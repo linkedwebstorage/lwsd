@@ -101,15 +101,15 @@ try {
 console.log(chalk.cyan(`
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                                                                   ║
-║                   ${chalk.bold.white('██╗     ██╗    ██╗███████╗██████╗ ')}                    ║
-║                   ${chalk.bold.white('██║     ██║    ██║██╔════╝██╔══██╗')}                    ║
-║                   ${chalk.bold.white('██║     ██║ █╗ ██║███████╗██║  ██║')}                    ║
-║                   ${chalk.bold.white('██║     ██║███╗██║╚════██║██║  ██║')}                    ║
-║                   ${chalk.bold.white('███████╗╚███╔███╔╝███████║██████╔╝')}                    ║
-║                   ${chalk.bold.white('╚══════╝ ╚══╝╚══╝ ╚══════╝╚═════╝ ')}                    ║
+║                   ${chalk.bold.white('██╗     ██╗    ██╗███████╗██████╗ ')}              ║
+║                   ${chalk.bold.white('██║     ██║    ██║██╔════╝██╔══██╗')}              ║
+║                   ${chalk.bold.white('██║     ██║ █╗ ██║███████╗██║  ██║')}              ║
+║                   ${chalk.bold.white('██║     ██║███╗██║╚════██║██║  ██║')}              ║
+║                   ${chalk.bold.white('███████╗╚███╔███╔╝███████║██████╔╝')}              ║
+║                   ${chalk.bold.white('╚══════╝ ╚══╝╚══╝ ╚══════╝╚═════╝ ')}              ║
 ║                                                                   ║
-║                ${chalk.bold.yellow('LWS Daemon - Authentication Edition')}                   ║
-║                ${chalk.dim('W3C-compliant storage with security')}                     ║
+║                ${chalk.bold.yellow('LWS Daemon - Authentication Edition')}                ║
+║                ${chalk.dim('W3C-compliant storage with security')}                ║
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 `));
