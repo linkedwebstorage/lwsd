@@ -1,6 +1,6 @@
 {
   "name": "lwsd",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "LWS Daemon - Full-featured Linked Web Storage server with authentication",
   "type": "module",
   "main": "index.js",
