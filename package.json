@@ -1,0 +1,50 @@
+{
+  "name": "lwsd",
+  "version": "0.0.1",
+  "description": "LWS Daemon - Full-featured Linked Web Storage server with authentication",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "lwsd": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linkedwebstorage/lwsd.git"
+  },
+  "keywords": [
+    "lws",
+    "linked",
+    "web",
+    "storage",
+    "linkedwebstorage",
+    "rest",
+    "api",
+    "server",
+    "authentication",
+    "passkey",
+    "webauthn",
+    "oauth",
+    "daemon"
+  ],
+  "author": "Melvin Carvalho",
+  "license": "AGPL-3.0",
+  "bugs": {
+    "url": "https://github.com/linkedwebstorage/lwsd/issues"
+  },
+  "homepage": "https://github.com/linkedwebstorage/lwsd#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "lws-server": "^0.0.4",
+    "chalk": "^5.6.2",
+    "@simplewebauthn/server": "^10.0.0",
+    "@fastify/cookie": "^10.0.1",
+    "@fastify/session": "^11.0.1",
+    "@fastify/jwt": "^9.0.1"
+  }
+}
