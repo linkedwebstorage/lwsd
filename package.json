@@ -1,6 +1,6 @@
 {
   "name": "lwsd",
-  "version": "0.1.0",
+  "version": "0.0.3",
   "description": "LWS Daemon — W3C Linked Web Storage server (JSS + lws plugin)",
   "type": "module",
   "main": "index.js",
