@@ -307,7 +307,9 @@ export async function activate (api) {
       return null
     }
     const ctx = accessCtx(req, agent, action, urlPath, resourceType, mediaType)
-    const allowed = (!isRead && (!writers.length || writers.includes(agent))) || evalGrants(grants(), ctx)
+    // The writer allowlist represents trusted storage controllers (full access).
+    // With no allowlist, any authenticated agent may write; reads are grant-gated.
+    const allowed = writers.includes(agent) || (!writers.length && !isRead) || evalGrants(grants(), ctx)
     if (!allowed) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted to ${action}`); return null }
     return agent
   }
