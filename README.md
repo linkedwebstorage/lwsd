@@ -11,8 +11,8 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**Conformance: 26/26 MUST-level checks** against the current lws10-core editor's draft —
-see [CONFORMANCE.md](CONFORMANCE.md) for the implemented matrix and, more interestingly,
+**Conformance: 47/47 feature checks + 6/6 auth checks** across the current editors drafts (core, searchindex, notifications, did:key authn) —
+see [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly,
 the catalogue of spec conflicts and host-API gaps the implementation surfaced.
 
 ## Quick Start
@@ -54,19 +54,31 @@ current configuration limitations.
 
 ## What's implemented
 
-lws10-core: CRUD with POST-to-create, conditional updates (428/412), container
-representations (`application/lws+json` + conneg), linkset metadata resources
-(RFC 9264, merge-patch), storage description discovery, `Depth: infinity` recursive
-delete, Range requests, RFC 9457 errors.
+- **lws10-core** — CRUD with POST-to-create, conditional updates (428/412), content PATCH
+  (merge-patch), container representations (`application/lws+json` + conneg), link-based
+  pagination, linkset metadata resources (RFC 9264), storage description discovery,
+  `Depth: infinity` recursive delete, Range requests, RFC 9457 errors.
+- **lws10-searchindex** — `TypeIndexService` + `TypeSearchService` with the full CNF filter
+  (GET + POST), types derived from `Link` headers at write time.
+- **lws10-notifications** — webhook subscriptions, Activity Streams 2.0 envelopes, and
+  **RFC 9421 HTTP Message Signatures** (ES256, key published in the storage description).
+- **Authorization surface** — 401 `WWW-Authenticate` challenges, access request/grant
+  endpoints, and **did:key self-issued JWT** credentials (Ed25519 + P-256).
 
-Not yet: pagination, content PATCH, lws10-notifications, lws10-searchindex, the
-lws10-authn suite, and the LWS authorization model.
+Not yet: the SAML/OpenID authn suites (need an external authorization server), the full
+OAuth token-exchange flow. See [CONFORMANCE.md](CONFORMANCE.md) §Findings for why.
 
 ## Test suite
 
 ```bash
-node index.js --no-auth &          # or any LWS server
+# feature battery (47 checks)
+LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5 node index.js --no-auth &
 node test/conformance.js http://localhost:3126/lws
+
+# auth battery (6 checks — did:key + 401 challenge)
+DID=$(node test/auth.js --emit-did)
+LWS_WRITERS="$DID" node index.js &
+node test/auth.js http://localhost:3126/lws
 ```
 
 ## License

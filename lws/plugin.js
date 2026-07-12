@@ -1,21 +1,25 @@
 //
-// lws plugin for JSS — a W3C LWS 1.0 (lws10-core) protocol face.
+// lws plugin for JSS — a W3C LWS 1.0 protocol face.
 //
 // Mount:  jss start --plugin ./lws/plugin.js@/lws   (or via lwsd)
 //
-// Implements the current editor's draft of lws10-core over a plain
-// directory tree: containers are directories, data resources are files.
-// Server-managed metadata (linksets, ETags, containment) is derived from
-// the filesystem; client-managed linkset links live in the plugin's
-// private storage. Known divergences from the spec, and the places the
-// plugin API cannot reach, are catalogued in ../CONFORMANCE.md.
+// Implements the current editor's drafts of lws10-core, lws10-notifications
+// (webhooks + RFC 9421 signatures), lws10-searchindex (TypeIndex/TypeSearch),
+// the lws10-core authorization discovery surface (401 challenges, access
+// requests/grants), and experimental lws10-authn-ssi-did-key credential
+// acceptance. Containers are directories, data resources are files;
+// server-managed metadata is derived, client-managed state lives in the
+// plugin's private storage. Divergences and host-API gaps: ../CONFORMANCE.md.
 //
-// Config (all optional): dataRoot, baseUrl, writers (did list).
+// Config (all optional): dataRoot, baseUrl, writers, anonWrites, pageSize.
+// Env fallbacks (CLI has no config channel): LWS_ANON_WRITES, LWS_PAGE_SIZE.
 //
 
 import { promises as fs, createReadStream } from 'fs'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import path from 'path'
+import { Notifier } from './notify.js'
+import { verifySelfIssuedJwt } from './didkey.js'
 
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
@@ -26,24 +30,58 @@ const MIME = {
   '.html': 'text/html', '.ttl': 'text/turtle', '.md': 'text/markdown',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.css': 'text/css', '.js': 'text/javascript',
 }
+// Structural/protocol relations are never indexed as descriptive relations.
+const STRUCTURAL_RELS = new Set(['type', 'up', 'linkset', 'storagedescription', 'self', 'first', 'next', 'prev', 'last'])
 
 const problem = (reply, status, title, detail) =>
   reply.code(status).type('application/problem+json')
     .send({ type: 'about:blank', title, status, ...(detail && { detail }) })
 
+// Parse Link headers into [{href, rel}] (attributes beyond rel are dropped).
+function parseLinks (header) {
+  const out = []
+  for (const part of String(header || '').split(/,(?=\s*<)/)) {
+    const m = /^\s*<([^>]+)>\s*(.*)$/.exec(part)
+    if (!m) continue
+    const rel = /rel="?([^";]+)"?/.exec(m[2])?.[1]
+    if (rel) for (const r of rel.split(/\s+/)) out.push({ href: m[1], rel: r })
+  }
+  return out
+}
+
 export async function activate (api) {
   const { fastify, prefix, config, log } = api
   const root = config.root || path.resolve(api.storage.pluginDir(), '..', '..')
   const dataRoot = config.dataRoot || path.join(root, 'lws-data')
-  const metaDir = path.join(api.storage.pluginDir(), 'meta')
-  await fs.mkdir(dataRoot, { recursive: true })
-  await fs.mkdir(metaDir, { recursive: true })
+  const priv = api.storage.pluginDir()
+  const metaDir = path.join(priv, 'meta')
+  const accessDir = path.join(priv, 'access')
+  const pageSize = config.pageSize || parseInt(process.env.LWS_PAGE_SIZE, 10) || 100
+  for (const d of [dataRoot, metaDir, accessDir]) await fs.mkdir(d, { recursive: true })
+
+  const notifier = new Notifier(priv, log)
+  await notifier.init()
+
+  // type index: urlPath -> { types: [], rels: { relName: [targets] } }
+  const typeIndexFile = path.join(priv, 'typeindex.json')
+  let typeIndex = {}
+  try { typeIndex = JSON.parse(await fs.readFile(typeIndexFile, 'utf8')) } catch { /* fresh */ }
+  const saveTypeIndex = () => fs.writeFile(typeIndexFile, JSON.stringify(typeIndex))
+
+  // access grants/requests: id -> object
+  const accessFile = (kind) => path.join(accessDir, kind + '.json')
+  const access = { request: {}, grant: {} }
+  for (const kind of ['request', 'grant']) {
+    try { access[kind] = JSON.parse(await fs.readFile(accessFile(kind), 'utf8')) } catch { /* fresh */ }
+  }
+  const saveAccess = (kind) => fs.writeFile(accessFile(kind), JSON.stringify(access[kind]))
 
   // --- helpers ---------------------------------------------------------------
 
   const baseUrl = (req) => config.baseUrl || `${req.protocol}://${req.headers.host}`
+  const href = (req, urlPath) => baseUrl(req) + prefix + urlPath
+  const storageId = (req) => href(req, '/')
 
-  // Resolve a request path to a filesystem path, refusing traversal.
   function resolvePath (urlPath) {
     const rel = decodeURIComponent(urlPath).replace(/^\/+/, '')
     const abs = path.resolve(dataRoot, rel)
@@ -67,8 +105,6 @@ export async function activate (api) {
     try { return JSON.parse(await fs.readFile(metaFile(urlPath), 'utf8')) } catch { return {} }
   }
 
-  // Canonical URL bits. urlPath is the path *under* the prefix ('' = root).
-  const href = (req, urlPath) => baseUrl(req) + prefix + urlPath
   const parentOf = (urlPath) => {
     if (!urlPath || urlPath === '/') return null
     const p = urlPath.replace(/\/$/, '')
@@ -76,11 +112,9 @@ export async function activate (api) {
     return p.slice(0, i + 1)
   }
 
-  // Linkset and description URIs live under the reserved `/-/` segment:
-  // the spec's own `.meta` example convention uses leading-dot path segments,
-  // which jss core's dot-segment guard blocks before they reach any plugin
-  // (403; conflict C2 in CONFORMANCE.md). Discovery is Link-based, so URIs
-  // are opaque and any server-chosen shape is conformant.
+  // Linkset/description/service URIs live under the reserved `/-/` segment:
+  // the spec's `.meta` examples imply leading-dot segments, which jss core's
+  // dot-segment guard 403s before any plugin sees them (CONFORMANCE.md C1).
   function lwsHeaders (reply, req, urlPath, isContainer) {
     const links = [
       `<${href(req, '/-/meta' + (urlPath || '/'))}>; rel="linkset"; type="${LINKSET_JSON}"`,
@@ -92,12 +126,33 @@ export async function activate (api) {
     reply.header('link', links.join(', '))
   }
 
-  // Container representation per lws10-core container-representation.md
-  async function containerRep (req, urlPath, abs) {
-    const names = (await fs.readdir(abs, { withFileTypes: true }))
-      .filter((d) => !d.name.startsWith('.'))
+  function negotiate (req) {
+    const a = req.headers.accept || ''
+    if (a.includes('application/ld+json')) return 'application/ld+json'
+    if (a.includes('application/json') && !a.includes(LWS_JSON)) return 'application/json'
+    return LWS_JSON
+  }
+
+  // Link-based pagination (lws-media-type.md §Pagination): slice items,
+  // emit first/next/prev/last Link headers with opaque ?page= URIs.
+  function paginate (reply, req, urlPath, items, extraQuery = '') {
+    const total = items.length
+    if (total <= pageSize) return { items, total }
+    const pages = Math.ceil(total / pageSize)
+    const page = Math.min(Math.max(parseInt(req.query?.page, 10) || 1, 1), pages)
+    const pageUrl = (n) => `${href(req, urlPath)}?page=${n}${extraQuery}`
+    const links = [`<${pageUrl(1)}>; rel="first"`, `<${pageUrl(pages)}>; rel="last"`]
+    if (page < pages) links.push(`<${pageUrl(page + 1)}>; rel="next"`)
+    if (page > 1) links.push(`<${pageUrl(page - 1)}>; rel="prev"`)
+    const prior = reply.getHeader('link')
+    reply.header('link', (prior ? prior + ', ' : '') + links.join(', '))
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), total }
+  }
+
+  async function containerItems (urlPath, abs) {
+    const names = (await fs.readdir(abs, { withFileTypes: true })).filter((d) => !d.name.startsWith('.'))
     const items = []
-    for (const d of names) {
+    for (const d of names.sort((a, b) => a.name.localeCompare(b.name))) {
       const st = await fs.stat(path.join(abs, d.name))
       items.push(d.isDirectory()
         ? { type: 'Container', id: prefix + urlPath + d.name + '/' }
@@ -109,50 +164,118 @@ export async function activate (api) {
             modified: st.mtime.toISOString(),
           })
     }
-    return { '@context': CONTEXT, id: prefix + urlPath, type: 'Container', totalItems: items.length, items }
+    return items
   }
 
-  // Content negotiation for container/description bodies: identical payload,
-  // only the Content-Type varies (lws-media-type.md).
-  function negotiate (req) {
-    const a = req.headers.accept || ''
-    if (a.includes('application/ld+json')) return 'application/ld+json'
-    if (a.includes('application/json') && !a.includes(LWS_JSON)) return 'application/json'
-    return LWS_JSON
-  }
+  // --- type index (lws10-searchindex) ----------------------------------------
 
-
-  // --- auth (writes) ----------------------------------------------------------
-  // v1: reads are public; writes need an authenticated agent. If config.writers
-  // is set, the agent must be in it. (LWS AuthZ spec not yet implemented.)
-  // LWS_ANON_WRITES=1 (or config.anonWrites) allows anonymous writes for
-  // conformance testing — the plugin api exposes neither the host's --public
-  // mode nor a CLI config channel, so an env var is the only knob reachable
-  // from `jss start --plugin ...` (see CONFORMANCE.md, conflicts C7/C8).
-  const anonWrites = config.anonWrites === true || process.env.LWS_ANON_WRITES === '1'
-  async function authorizeWrite (req, reply) {
-    if (anonWrites) return 'anonymous'
-    const agent = await api.auth.getAgent(req)
-    if (!agent) { problem(reply, 401, 'Unauthorized', 'authentication required for writes'); return null }
-    if (Array.isArray(config.writers) && config.writers.length && !config.writers.includes(agent)) {
-      problem(reply, 403, 'Forbidden', `agent ${agent} not permitted`); return null
+  // Record types/relations declared via Link headers at write time.
+  function recordLinks (urlPath, linkHeader, isContainer) {
+    const entry = { types: [LWS + (isContainer ? 'Container' : 'DataResource')], rels: {} }
+    for (const { href: target, rel } of parseLinks(linkHeader)) {
+      if (rel === 'type') {
+        if (!entry.types.includes(target)) entry.types.push(target)
+      } else if (!STRUCTURAL_RELS.has(rel.toLowerCase())) {
+        (entry.rels[rel] = entry.rels[rel] || []).push(target)
+      }
     }
+    typeIndex[urlPath] = entry
+    saveTypeIndex().catch(() => {})
+  }
+  function unrecord (urlPath) {
+    for (const k of Object.keys(typeIndex)) {
+      if (k === urlPath || k.startsWith(urlPath.endsWith('/') ? urlPath : urlPath + '/')) delete typeIndex[k]
+    }
+    saveTypeIndex().catch(() => {})
+  }
+
+  // CNF filter: groups is [[a,b],[c]] meaning (a OR b) AND (c). Empty groups ignored.
+  function cnfMatch (declared, groups) {
+    return groups.every((group) => group.length === 0 || group.some((t) => declared.includes(t)))
+  }
+  const parseGroups = (v) => [].concat(v ?? []).map((g) =>
+    Array.isArray(g) ? g : String(g).split(',').map((s) => s.trim()).filter(Boolean))
+
+  function searchIndex (filters) {
+    const out = []
+    for (const [urlPath, entry] of Object.entries(typeIndex)) {
+      let ok = true
+      for (const [rel, groups] of Object.entries(filters)) {
+        const declared = rel === 'type' ? entry.types : (entry.rels[rel] || [])
+        if (!cnfMatch(declared, groups)) { ok = false; break }
+      }
+      if (ok) out.push({ id: prefix + urlPath, type: entry.types.map((t) => t === LWS + 'Container' ? 'Container' : t === LWS + 'DataResource' ? 'DataResource' : t) })
+    }
+    return out.sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  // --- auth ------------------------------------------------------------------
+  // Reads public; writes need an agent. Challenge format per Authorization.html.
+  // did:key self-issued JWTs are accepted directly (experimental; C12).
+  const anonWrites = config.anonWrites === true || process.env.LWS_ANON_WRITES === '1'
+  const writers = Array.isArray(config.writers) && config.writers.length ? config.writers
+    : (process.env.LWS_WRITERS || '').split(',').map((s) => s.trim()).filter(Boolean)
+
+  function challenge (reply, req) {
+    reply.header('www-authenticate',
+      `Bearer as_uri="${baseUrl(req)}", realm="${storageId(req)}", error="invalid_token"`)
+  }
+
+  async function agentOf (req) {
+    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1]
+    if (bearer && bearer.split('.').length === 3) {
+      const did = verifySelfIssuedJwt(bearer)
+      if (did) return did
+    }
+    return api.auth.getAgent(req)
+  }
+
+  function grantAllows (agent, action, urlPath) {
+    return Object.values(access.grant).some((g) =>
+      g.assignee === agent && [].concat(g.action || []).includes(action) &&
+      [].concat(g.target || []).some((t) => urlPath.startsWith(t)))
+  }
+
+  async function authorizeWrite (req, reply, urlPath = '/') {
+    if (anonWrites) return 'anonymous'
+    const agent = await agentOf(req)
+    if (!agent) { challenge(reply, req); problem(reply, 401, 'Unauthorized', 'authentication required for writes'); return null }
+    const allowed = !writers.length || writers.includes(agent) || grantAllows(agent, 'write', urlPath)
+    if (!allowed) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted`); return null }
     return agent
   }
 
-  // --- routes -----------------------------------------------------------------
+  // --- notifications helpers ---------------------------------------------------
 
-  const route = (urlOf) => async (req, reply) => {
-    const urlPath = urlOf(req)
+  const emit = (req, type, urlPath, isContainer, extra = {}) =>
+    notifier.emit(storageId(req), {
+      type: [type],
+      object: { id: href(req, urlPath), type: [isContainer ? 'Container' : 'DataResource'] },
+      ...extra,
+    })
 
-    // storage description resource (Discovery.html)
+  // --- service routes under /-/ -------------------------------------------------
+
+  async function serviceRoutes (req, reply, urlPath) {
+    // storage description (Discovery.html + service advertising)
     if (urlPath === '/-/description') {
+      const id = storageId(req)
+      const frag = notifier.descriptionFragment(id, href(req, '/-/subscriptions'))
       reply.type(negotiate(req)).header('link', `<${href(req, '/-/description')}>; rel="${LWS}storageDescription"`)
       return {
         '@context': CONTEXT,
-        id: href(req, '/'),
+        id,
         type: 'Storage',
-        service: [{ type: 'StorageDescription', serviceEndpoint: href(req, '/-/description') }],
+        verificationMethod: frag.verificationMethod,
+        authentication: frag.authentication,
+        service: [
+          { type: 'StorageDescription', serviceEndpoint: href(req, '/-/description') },
+          ...frag.service,
+          { type: 'TypeIndexService', serviceEndpoint: href(req, '/-/types/index') },
+          { type: 'TypeSearchService', serviceEndpoint: href(req, '/-/types/search') },
+          { type: 'AccessRequestService', serviceEndpoint: href(req, '/-/access/requests'), conformsTo: [LWS + 'AccessProfile'] },
+          { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
+        ],
       }
     }
 
@@ -168,16 +291,16 @@ export async function activate (api) {
         if ((req.headers['content-type'] || '').split(';')[0] !== 'application/merge-patch+json') {
           return problem(reply, 415, 'Unsupported Media Type', 'use application/merge-patch+json')
         }
-        if (!await authorizeWrite(req, reply)) return
+        if (!await authorizeWrite(req, reply, target)) return
         const cur = await userLinks(target)
-        const patch = req.body || {}
-        for (const [k, v] of Object.entries(patch)) {
+        for (const [k, v] of Object.entries(req.body || {})) {
           if (['linkset', 'type', 'mediaType', 'size', 'modified', 'up', 'items'].includes(k)) {
             return problem(reply, 409, 'Conflict', `link relation '${k}' is server-managed`)
           }
           if (v === null) delete cur[k]; else cur[k] = v
         }
         await fs.writeFile(metaFile(target), JSON.stringify(cur))
+        emit(req, 'Update', target, isC)
         reply.code(204); return reply.send()
       }
       const user = await userLinks(target)
@@ -185,11 +308,111 @@ export async function activate (api) {
       const up = parentOf(target)
       if (up !== null) entry.up = [{ href: href(req, up) }]
       for (const [rel, hrefs] of Object.entries(user)) entry[rel] = [].concat(hrefs).map((h) => ({ href: h }))
-      reply.type(LINKSET_JSON)
-        .header('allow', 'GET, HEAD, PATCH')
+      reply.type(LINKSET_JSON).header('allow', 'GET, HEAD, PATCH')
         .header('accept-patch', 'application/merge-patch+json')
       return { linkset: [entry] }
     }
+
+    // notification subscriptions (lws10-notifications)
+    if (urlPath === '/-/subscriptions' || urlPath === '/-/subscriptions/') {
+      if (req.method === 'POST') {
+        const agent = await authorizeWrite(req, reply); if (!agent) return
+        const b = req.body || {}
+        if (b.type !== 'WebhookSubscription') return problem(reply, 400, 'Bad Request', 'unsupported subscription type')
+        if (!Array.isArray(b.topic) || !b.topic.length) return problem(reply, 400, 'Bad Request', 'topic array required')
+        if (typeof b.inbox !== 'string') return problem(reply, 400, 'Bad Request', 'inbox required')
+        // subscription authorization: reads are public in v1, so read access
+        // to all topics holds; enforce topic shape only (CONFORMANCE.md C13)
+        const sub = await notifier.create({ topic: b.topic, inbox: b.inbox, expires: b.expires, subscriber: agent })
+        const subUrl = href(req, '/-/subscriptions/' + sub.id)
+        reply.code(200).type(LWS_JSON).header('location', subUrl)
+        return { '@context': [CONTEXT], type: 'WebhookSubscription', subscription: subUrl, ...(sub.expires && { expires: sub.expires }) }
+      }
+      // GET: list as an LWS container representation (spec: management endpoint)
+      const agent = anonWrites ? null : await agentOf(req)
+      const subs = notifier.list(anonWrites ? null : agent)
+      const items = subs.map((s) => ({ type: 'DataResource', id: prefix + '/-/subscriptions/' + s.id, mediaType: LWS_JSON }))
+      const paged = paginate(reply, req, '/-/subscriptions', items)
+      reply.type(LWS_JSON)
+      return { '@context': CONTEXT, id: prefix + '/-/subscriptions', type: 'Container', totalItems: paged.total, items: paged.items }
+    }
+    if (urlPath.startsWith('/-/subscriptions/')) {
+      const id = urlPath.slice('/-/subscriptions/'.length)
+      const sub = notifier.get(id)
+      if (!sub) return problem(reply, 404, 'Not Found')
+      if (req.method === 'DELETE') { await notifier.remove(id); reply.code(204); return reply.send() }
+      reply.type(LWS_JSON)
+      return { '@context': [CONTEXT], ...sub, subscription: href(req, '/-/subscriptions/' + id) }
+    }
+
+    // type index + search (lws10-searchindex)
+    if (urlPath === '/-/types/index') {
+      const types = [...new Set(Object.values(typeIndex).flatMap((e) => e.types))].sort()
+      const paged = paginate(reply, req, '/-/types/index', types.map((t) => ({ id: t })))
+      reply.type(LWS_JSON)
+      return { '@context': CONTEXT, type: 'TypeIndex', totalItems: paged.total, items: paged.items }
+    }
+    if (urlPath === '/-/types/search') {
+      let filters = {}
+      if (req.method === 'POST') {
+        for (const [k, v] of Object.entries(req.body || {})) {
+          if (k === '@context') continue
+          filters[k] = parseGroups(v)
+        }
+      } else {
+        for (const [k, v] of Object.entries(req.query || {})) {
+          if (k === 'page') continue
+          filters[k] = parseGroups(v)
+        }
+      }
+      const matches = searchIndex(filters)
+      const paged = paginate(reply, req, '/-/types/search', matches)
+      reply.type(LWS_JSON)
+      return { '@context': CONTEXT, type: 'ContainerPage', totalItems: paged.total, items: paged.items }
+    }
+
+    // access requests + grants (lws-access-requests.html)
+    for (const kind of ['request', 'grant']) {
+      const base = `/-/access/${kind}s`
+      if (urlPath === base || urlPath === base + '/') {
+        if (req.method === 'POST') {
+          // requests: any authenticated agent; grants: storage controller
+          // (v1: the write gate stands in for the controller check)
+          const agent = await authorizeWrite(req, reply); if (!agent) return
+          const id = randomUUID()
+          const obj = { ...(req.body || {}), id: href(req, `${base}/${id}`), type: kind === 'request' ? 'AccessRequest' : 'AccessGrant', issued: new Date().toISOString(), creator: agent }
+          access[kind][id] = obj
+          await saveAccess(kind)
+          reply.code(201).header('location', obj.id).type(LWS_JSON)
+          return { '@context': CONTEXT, ...obj }
+        }
+        const items = Object.keys(access[kind]).map((id) => ({ type: 'DataResource', id: prefix + `${base}/${id}`, mediaType: LWS_JSON }))
+        const paged = paginate(reply, req, base, items)
+        reply.type(LWS_JSON)
+        return { '@context': CONTEXT, id: prefix + base, type: 'Container', totalItems: paged.total, items: paged.items }
+      }
+      if (urlPath.startsWith(base + '/')) {
+        const id = urlPath.slice(base.length + 1)
+        const obj = access[kind][id]
+        if (!obj) return problem(reply, 404, 'Not Found')
+        if (req.method === 'DELETE') {
+          if (!await authorizeWrite(req, reply)) return
+          delete access[kind][id]; await saveAccess(kind)
+          reply.code(204); return reply.send()
+        }
+        reply.type(LWS_JSON)
+        return { '@context': CONTEXT, ...obj }
+      }
+    }
+
+    return problem(reply, 404, 'Not Found')
+  }
+
+  // --- main route ------------------------------------------------------------
+
+  const route = (urlOf) => async (req, reply) => {
+    const urlPath = urlOf(req)
+    if (urlPath === '/-' || urlPath.startsWith('/-/')) return serviceRoutes(req, reply, urlPath)
 
     const abs = resolvePath(urlPath)
     if (!abs) return problem(reply, 400, 'Bad Request', 'invalid path')
@@ -201,12 +424,15 @@ export async function activate (api) {
       case 'HEAD': {
         if (!st) return problem(reply, 404, 'Not Found')
         if (st.isDirectory()) {
+          const cPath = urlPath.endsWith('/') ? urlPath : urlPath + '/'
           const etag = await containerEtag(abs)
           if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
-          lwsHeaders(reply, req, urlPath.endsWith('/') ? urlPath : urlPath + '/', true)
+          lwsHeaders(reply, req, cPath, true)
+          const all = await containerItems(cPath, abs)
+          const paged = paginate(reply, req, cPath, all)
           reply.header('etag', etag).header('vary', 'Accept').type(negotiate(req))
           if (req.method === 'HEAD') return reply.send()
-          return containerRep(req, urlPath.endsWith('/') ? urlPath : urlPath + '/', abs)
+          return { '@context': CONTEXT, id: prefix + cPath, type: 'Container', totalItems: paged.total, items: paged.items }
         }
         const etag = etagOf(st)
         if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
@@ -215,8 +441,8 @@ export async function activate (api) {
           .type(MIME[path.extname(abs)] || 'application/octet-stream')
         const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '')
         if (range && (range[1] || range[2])) {
-          let start = range[1] ? parseInt(range[1], 10) : st.size - parseInt(range[2], 10)
-          let end = range[1] ? (range[2] ? Math.min(parseInt(range[2], 10), st.size - 1) : st.size - 1) : st.size - 1
+          const start = range[1] ? parseInt(range[1], 10) : st.size - parseInt(range[2], 10)
+          const end = range[1] ? (range[2] ? Math.min(parseInt(range[2], 10), st.size - 1) : st.size - 1) : st.size - 1
           if (isNaN(start) || start < 0 || start > end) {
             reply.code(416).header('content-range', `bytes */${st.size}`); return reply.send()
           }
@@ -231,12 +457,10 @@ export async function activate (api) {
       case 'POST': { // create in container (Operations/create-resource.md)
         if (!st) return problem(reply, 404, 'Not Found', 'target container does not exist')
         if (!st.isDirectory()) return problem(reply, 405, 'Method Not Allowed', 'POST targets a container')
-        if (!await authorizeWrite(req, reply)) return
-        const wantsContainer = /rel="?type"?/.test(req.headers.link || '') && (req.headers.link || '').includes(LWS + 'Container')
+        if (!await authorizeWrite(req, reply, urlPath)) return
+        const wantsContainer = parseLinks(req.headers.link).some((l) => l.rel === 'type' && l.href === LWS + 'Container')
         let name = (req.headers.slug || '').replace(/[^\w.\- ]/g, '').trim() ||
           (wantsContainer ? 'container-' : 'resource-') + Date.now().toString(36)
-        // '-' is the reserved metadata namespace; '.'-led names are shadowed
-        // by the host's dot-segment guard and would be unreachable
         if (name === '-' || name.startsWith('.')) name = 'r-' + name.replace(/^[.-]+/, '')
         while (await fs.access(path.join(abs, name)).then(() => true, () => false)) {
           name = name.replace(/(\.[^.]*)?$/, (ext) => '-' + Math.random().toString(36).slice(2, 6) + (ext || ''))
@@ -247,6 +471,8 @@ export async function activate (api) {
         if (wantsContainer) await fs.mkdir(childAbs)
         else await fs.writeFile(childAbs, req.body ?? '')
         const cst = await fs.stat(childAbs)
+        recordLinks(childPath, req.headers.link, wantsContainer)
+        emit(req, 'Create', childPath, wantsContainer, { target: href(req, base) })
         lwsHeaders(reply, req, childPath, wantsContainer)
         reply.code(201).header('location', prefix + childPath)
           .header('etag', wantsContainer ? await containerEtag(childAbs) : etagOf(cst))
@@ -254,7 +480,7 @@ export async function activate (api) {
       }
 
       case 'PUT': { // update content only (Operations/update-resource.md)
-        if (!await authorizeWrite(req, reply)) return
+        if (!await authorizeWrite(req, reply, urlPath)) return
         if (st && st.isDirectory()) return problem(reply, 405, 'Method Not Allowed', 'containers are created via POST')
         if (!st) return problem(reply, 404, 'Not Found', 'PUT updates an existing resource; create via POST to the parent container')
         const ifMatch = req.headers['if-match']
@@ -263,18 +489,49 @@ export async function activate (api) {
           return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
         }
         await fs.writeFile(abs, req.body ?? '')
+        if (req.headers.link) recordLinks(urlPath, req.headers.link, false)
+        emit(req, 'Update', urlPath, false)
+        reply.code(204).header('etag', etagOf(await fs.stat(abs)))
+        return reply.send()
+      }
+
+      case 'PATCH': { // partial content update — merge-patch for JSON resources
+        if (!st) return problem(reply, 404, 'Not Found')
+        if (st.isDirectory()) return problem(reply, 405, 'Method Not Allowed')
+        if (!await authorizeWrite(req, reply, urlPath)) return
+        const ct = (req.headers['content-type'] || '').split(';')[0]
+        const targetType = MIME[path.extname(abs)] || 'application/octet-stream'
+        if (ct !== 'application/merge-patch+json' || !['application/json', 'application/ld+json'].includes(targetType)) {
+          reply.header('accept-patch', 'application/merge-patch+json')
+          return problem(reply, 415, 'Unsupported Media Type', 'merge-patch on JSON resources only')
+        }
+        const ifMatch = req.headers['if-match']
+        if (ifMatch && ifMatch !== etagOf(st) && ifMatch !== '*') {
+          return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
+        }
+        let doc
+        try { doc = JSON.parse(await fs.readFile(abs, 'utf8')) } catch { return problem(reply, 409, 'Conflict', 'stored content is not valid JSON') }
+        const merge = (t, p) => {
+          if (p === null || typeof p !== 'object' || Array.isArray(p)) return p
+          const out = (t && typeof t === 'object' && !Array.isArray(t)) ? { ...t } : {}
+          for (const [k, v] of Object.entries(p)) { if (v === null) delete out[k]; else out[k] = merge(out[k], v) }
+          return out
+        }
+        await fs.writeFile(abs, JSON.stringify(merge(doc, req.body)))
+        emit(req, 'Update', urlPath, false)
         reply.code(204).header('etag', etagOf(await fs.stat(abs)))
         return reply.send()
       }
 
       case 'DELETE': { // Operations/delete-resource.md
         if (!st) return problem(reply, 404, 'Not Found')
-        if (!await authorizeWrite(req, reply)) return
+        if (!await authorizeWrite(req, reply, urlPath)) return
         const ifMatch = req.headers['if-match']
         if (ifMatch && !st.isDirectory() && ifMatch !== etagOf(st) && ifMatch !== '*') {
           return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
         }
-        if (st.isDirectory()) {
+        const isC = st.isDirectory()
+        if (isC) {
           const entries = await fs.readdir(abs)
           if (entries.length && (req.headers.depth || '').toLowerCase() !== 'infinity') {
             return problem(reply, 409, 'Conflict', 'container is not empty; use Depth: infinity for recursive delete')
@@ -284,24 +541,25 @@ export async function activate (api) {
           await fs.unlink(abs)
         }
         await fs.rm(metaFile(urlPath), { force: true })
+        unrecord(urlPath)
+        emit(req, 'Delete', urlPath + (isC && !urlPath.endsWith('/') ? '/' : ''), isC, { origin: href(req, parentOf(urlPath) || '/') })
         reply.code(204); return reply.send()
       }
 
-      case 'PATCH':
-        return problem(reply, 501, 'Not Implemented', 'content PATCH not implemented in this version')
-
       case 'OPTIONS':
-        reply.header('allow', 'GET, HEAD, POST, PUT, DELETE, OPTIONS'); reply.code(204); return reply.send()
+        reply.header('allow', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS'); reply.code(204); return reply.send()
 
       default:
         return problem(reply, 405, 'Method Not Allowed')
     }
   }
 
-  // Accept any body type verbatim (content is opaque to the storage).
   await fastify.register(async (scope) => {
     scope.removeAllContentTypeParsers()
     scope.addContentTypeParser('application/merge-patch+json', { parseAs: 'string' }, (r, body, done) => {
+      try { done(null, JSON.parse(body)) } catch (e) { done(e) }
+    })
+    scope.addContentTypeParser(LWS_JSON, { parseAs: 'string' }, (r, body, done) => {
       try { done(null, JSON.parse(body)) } catch (e) { done(e) }
     })
     scope.addContentTypeParser('*', { parseAs: 'buffer' }, (r, body, done) => done(null, body))
@@ -310,6 +568,6 @@ export async function activate (api) {
     scope.all(prefix, (req, reply) => reply.redirect(prefix + '/', 308))
   })
 
-  log.info(`lws plugin: storage root ${dataRoot}`)
+  log.info(`lws plugin: storage root ${dataRoot}, page size ${pageSize}`)
   return { deactivate () {} }
 }
