@@ -20,6 +20,8 @@ import { createHash, randomUUID } from 'crypto'
 import path from 'path'
 import { Notifier } from './notify.js'
 import { verifySelfIssuedJwt } from './didkey.js'
+import { verifyCidJwt } from './cidauth.js'
+import { evaluate as evalGrants, HTTP_TO_ACTION } from './access.js'
 
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
@@ -57,6 +59,9 @@ export async function activate (api) {
   const metaDir = path.join(priv, 'meta')
   const accessDir = path.join(priv, 'access')
   const pageSize = config.pageSize || parseInt(process.env.LWS_PAGE_SIZE, 10) || 100
+  const publicRead = config.publicRead !== false && process.env.LWS_PUBLIC_READ !== '0'
+  const quotaBytes = config.quotaBytes || parseInt(process.env.LWS_QUOTA_BYTES, 10) || 0
+  const allowLoopbackCid = config.allowLoopbackCid === true || process.env.LWS_CID_ALLOW_LOOPBACK === '1'
   for (const d of [dataRoot, metaDir, accessDir]) await fs.mkdir(d, { recursive: true })
 
   const notifier = new Notifier(priv, log)
@@ -100,6 +105,21 @@ export async function activate (api) {
     return `"${createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16)}"`
   }
 
+  // Quota (restbinding.md: 507 Insufficient Storage). delta = bytes added.
+  async function overQuota (delta) {
+    if (!quotaBytes || delta <= 0) return false
+    let used = 0
+    const walk = async (dir) => {
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name)
+        if (e.isDirectory()) await walk(p)
+        else { try { used += (await fs.stat(p)).size } catch { /* raced */ } }
+      }
+    }
+    await walk(dataRoot)
+    return used + delta > quotaBytes
+  }
+
   const metaFile = (urlPath) => path.join(metaDir, encodeURIComponent(urlPath) + '.json')
   async function userLinks (urlPath) {
     try { return JSON.parse(await fs.readFile(metaFile(urlPath), 'utf8')) } catch { return {} }
@@ -126,8 +146,11 @@ export async function activate (api) {
     reply.header('link', links.join(', '))
   }
 
+  // lws-media-type.md: identical body, only Content-Type varies.
+  // application/ld+json;profile="…lws/v1" is equivalent to application/lws+json.
   function negotiate (req) {
     const a = req.headers.accept || ''
+    if (/application\/ld\+json\s*;\s*profile\s*=\s*"?https:\/\/www\.w3\.org\/ns\/lws\/v1/.test(a)) return LWS_JSON
     if (a.includes('application/ld+json')) return 'application/ld+json'
     if (a.includes('application/json') && !a.includes(LWS_JSON)) return 'application/json'
     return LWS_JSON
@@ -196,6 +219,9 @@ export async function activate (api) {
   const parseGroups = (v) => [].concat(v ?? []).map((g) =>
     Array.isArray(g) ? g : String(g).split(',').map((s) => s.trim()).filter(Boolean))
 
+  const isAbsoluteUri = (s) => { try { return !!new URL(s).protocol } catch { return false } }
+  const shortType = (t) => t === LWS + 'Container' ? 'Container' : t === LWS + 'DataResource' ? 'DataResource' : t
+
   function searchIndex (filters) {
     const out = []
     for (const [urlPath, entry] of Object.entries(typeIndex)) {
@@ -204,14 +230,35 @@ export async function activate (api) {
         const declared = rel === 'type' ? entry.types : (entry.rels[rel] || [])
         if (!cnfMatch(declared, groups)) { ok = false; break }
       }
-      if (ok) out.push({ id: prefix + urlPath, type: entry.types.map((t) => t === LWS + 'Container' ? 'Container' : t === LWS + 'DataResource' ? 'DataResource' : t) })
+      if (ok) out.push({ urlPath, id: prefix + urlPath, type: entry.types.map(shortType), _types: entry.types })
     }
     return out.sort((a, b) => a.id.localeCompare(b.id))
   }
 
+  // Authorization filtering (searchindex §Security). For the index we need the
+  // set of typeIndex entries the client may read; for search we filter results.
+  async function visibleEntries (req, results) {
+    if (publicRead) {
+      if (results) return results.map(({ urlPath, ...r }) => r)
+      return Object.values(typeIndex)
+    }
+    if (results) {
+      const out = []
+      for (const r of results) if (await canRead(req, href(req, r.urlPath), r._types)) out.push({ id: r.id, type: r.type })
+      return out
+    }
+    const out = []
+    for (const [urlPath, entry] of Object.entries(typeIndex)) {
+      if (await canRead(req, href(req, urlPath), entry.types)) out.push(entry)
+    }
+    return out
+  }
+
   // --- auth ------------------------------------------------------------------
-  // Reads public; writes need an agent. Challenge format per Authorization.html.
-  // did:key self-issued JWTs are accepted directly (experimental; C12).
+  // Reads public by default; writes need an agent. Challenge per Authorization.html.
+  // Credentials accepted directly as Bearer (experimental; C12): did:key and CID
+  // self-issued JWTs. Authorization = a static writer allowlist OR the ODRL
+  // access-grant engine (lws-access-requests.html).
   const anonWrites = config.anonWrites === true || process.env.LWS_ANON_WRITES === '1'
   const writers = Array.isArray(config.writers) && config.writers.length ? config.writers
     : (process.env.LWS_WRITERS || '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -226,23 +273,53 @@ export async function activate (api) {
     if (bearer && bearer.split('.').length === 3) {
       const did = verifySelfIssuedJwt(bearer)
       if (did) return did
+      const cid = await verifyCidJwt(bearer, { allowLoopback: allowLoopbackCid })
+      if (cid) return cid
     }
     return api.auth.getAgent(req)
   }
 
-  function grantAllows (agent, action, urlPath) {
-    return Object.values(access.grant).some((g) =>
-      g.assignee === agent && [].concat(g.action || []).includes(action) &&
-      [].concat(g.target || []).some((t) => urlPath.startsWith(t)))
+  // Build the ODRL evaluation context for a request/resource.
+  function accessCtx (req, agent, action, urlPath, resourceType, mediaType) {
+    return {
+      agent, action, resourceUri: href(req, urlPath),
+      resourceType: resourceType || [], mediaType,
+      client: /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '') ? agent : null,
+      purpose: req.headers['x-lws-purpose'] || null,
+    }
   }
+  const grants = () => Object.values(access.grant)
 
-  async function authorizeWrite (req, reply, urlPath = '/') {
-    if (anonWrites) return 'anonymous'
+  // Central authorization. httpMethod → ODRL action. Returns the agent id on
+  // success (or 'anonymous'), or null after writing the error response.
+  async function authorize (req, reply, urlPath, { resourceType, mediaType } = {}) {
+    const action = HTTP_TO_ACTION[req.method] || 'read'
+    const isRead = action === 'read'
+    if (isRead && publicRead) return 'anonymous'
+    if (!isRead && anonWrites) return 'anonymous'
     const agent = await agentOf(req)
-    if (!agent) { challenge(reply, req); problem(reply, 401, 'Unauthorized', 'authentication required for writes'); return null }
-    const allowed = !writers.length || writers.includes(agent) || grantAllows(agent, 'write', urlPath)
-    if (!allowed) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted`); return null }
+    // Anonymous request: only a public (foaf:Agent) grant can permit it.
+    if (!agent) {
+      const ctx = accessCtx(req, null, action, urlPath, resourceType, mediaType)
+      if (evalGrants(grants(), ctx)) return 'anonymous'
+      challenge(reply, req)
+      problem(reply, 401, 'Unauthorized', 'authentication required')
+      return null
+    }
+    const ctx = accessCtx(req, agent, action, urlPath, resourceType, mediaType)
+    const allowed = (!isRead && (!writers.length || writers.includes(agent))) || evalGrants(grants(), ctx)
+    if (!allowed) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted to ${action}`); return null }
     return agent
+  }
+  // Back-compat shim for existing write call sites.
+  const authorizeWrite = (req, reply, urlPath = '/') => authorize(req, reply, urlPath)
+
+  // Read-authorization predicate for search filtering (no response side effects).
+  async function canRead (req, resourceUri, resourceType) {
+    if (publicRead) return true
+    const agent = await agentOf(req)
+    if (!agent) return false
+    return evalGrants(grants(), { agent, action: 'read', resourceUri, resourceType: resourceType || [], client: agent, purpose: req.headers['x-lws-purpose'] || null })
   }
 
   // --- notifications helpers ---------------------------------------------------
@@ -345,18 +422,30 @@ export async function activate (api) {
       return { '@context': [CONTEXT], ...sub, subscription: href(req, '/-/subscriptions/' + id) }
     }
 
-    // type index + search (lws10-searchindex)
+    // type index + search (lws10-searchindex). Authorization filtering
+    // (searchindex §Security): only types/URIs the client may read, counts
+    // over the client-specific view. Public-read = everything visible.
     if (urlPath === '/-/types/index') {
-      const types = [...new Set(Object.values(typeIndex).flatMap((e) => e.types))].sort()
+      const visible = await visibleEntries(req)
+      const types = [...new Set(visible.flatMap((e) => e.types))].sort()
       const paged = paginate(reply, req, '/-/types/index', types.map((t) => ({ id: t })))
       reply.type(LWS_JSON)
       return { '@context': CONTEXT, type: 'TypeIndex', totalItems: paged.total, items: paged.items }
     }
     if (urlPath === '/-/types/search') {
-      let filters = {}
+      const filters = {}
       if (req.method === 'POST') {
-        for (const [k, v] of Object.entries(req.body || {})) {
+        const ct = (req.headers['content-type'] || '').split(';')[0]
+        if (ct && ct !== LWS_JSON) return problem(reply, 415, 'Unsupported Media Type', 'use application/lws+json')
+        const b = req.body
+        if (!b || typeof b !== 'object') return problem(reply, 400, 'Bad Request', 'malformed lws+json body')
+        for (const [k, v] of Object.entries(b)) {
           if (k === '@context') continue
+          // each element must be a string or an array of strings
+          if (!Array.isArray(v) && typeof v !== 'string') return problem(reply, 400, 'Bad Request', `filter '${k}' must be a string or array`)
+          if (Array.isArray(v) && v.some((g) => !(typeof g === 'string' || (Array.isArray(g) && g.every((x) => typeof x === 'string'))))) {
+            return problem(reply, 400, 'Bad Request', `filter '${k}' elements must be strings or arrays of strings`)
+          }
           filters[k] = parseGroups(v)
         }
       } else {
@@ -365,7 +454,13 @@ export async function activate (api) {
           filters[k] = parseGroups(v)
         }
       }
-      const matches = searchIndex(filters)
+      // every filter value MUST be a syntactically valid absolute URI
+      for (const groups of Object.values(filters)) {
+        for (const g of groups) for (const val of g) {
+          if (!isAbsoluteUri(val)) return problem(reply, 400, 'Bad Request', `not an absolute URI: ${val}`)
+        }
+      }
+      const matches = (await visibleEntries(req, searchIndex(filters)))
       const paged = paginate(reply, req, '/-/types/search', matches)
       reply.type(LWS_JSON)
       return { '@context': CONTEXT, type: 'ContainerPage', totalItems: paged.total, items: paged.items }
@@ -423,6 +518,10 @@ export async function activate (api) {
       case 'GET':
       case 'HEAD': {
         if (!st) return problem(reply, 404, 'Not Found')
+        if (!publicRead) {
+          const rt = [st.isDirectory() ? LWS + 'Container' : LWS + 'DataResource', ...(typeIndex[urlPath]?.types || [])]
+          if (!await authorize(req, reply, urlPath, { resourceType: rt })) return
+        }
         if (st.isDirectory()) {
           const cPath = urlPath.endsWith('/') ? urlPath : urlPath + '/'
           const etag = await containerEtag(abs)
@@ -468,6 +567,9 @@ export async function activate (api) {
         const childAbs = path.join(abs, name)
         const base = urlPath.endsWith('/') ? urlPath : urlPath + '/'
         const childPath = base + name + (wantsContainer ? '/' : '')
+        if (!wantsContainer && await overQuota((req.body || '').length)) {
+          return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
+        }
         if (wantsContainer) await fs.mkdir(childAbs)
         else await fs.writeFile(childAbs, req.body ?? '')
         const cst = await fs.stat(childAbs)
@@ -487,6 +589,9 @@ export async function activate (api) {
         if (!ifMatch) return problem(reply, 428, 'Precondition Required', 'unconditional PUT rejected; supply If-Match')
         if (ifMatch !== etagOf(st) && ifMatch !== '*') {
           return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
+        }
+        if (await overQuota((req.body || '').length - st.size)) {
+          return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
         await fs.writeFile(abs, req.body ?? '')
         if (req.headers.link) recordLinks(urlPath, req.headers.link, false)

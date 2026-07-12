@@ -11,9 +11,10 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**Conformance: 47/47 feature checks + 6/6 auth checks** across the current editors drafts (core, searchindex, notifications, did:key authn) —
-see [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly,
-the catalogue of spec conflicts and host-API gaps the implementation surfaced.
+**Conformance: 72 checks across 4 batteries** (`npm test`) over the current editors' drafts —
+core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
+See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
+of spec conflicts and host-API gaps the implementation surfaced (C1–C14).
 
 ## Quick Start
 
@@ -55,31 +56,31 @@ current configuration limitations.
 ## What's implemented
 
 - **lws10-core** — CRUD with POST-to-create, conditional updates (428/412), content PATCH
-  (merge-patch), container representations (`application/lws+json` + conneg), link-based
-  pagination, linkset metadata resources (RFC 9264), storage description discovery,
-  `Depth: infinity` recursive delete, Range requests, RFC 9457 errors.
+  (merge-patch), container representations (`application/lws+json` + conneg incl. `ld+json;profile`),
+  link-based pagination, linkset metadata resources (RFC 9264), storage description discovery,
+  `Depth: infinity` recursive delete, Range requests, RFC 9457 errors, optional 507 quota.
 - **lws10-searchindex** — `TypeIndexService` + `TypeSearchService` with the full CNF filter
-  (GET + POST), types derived from `Link` headers at write time.
+  (GET + POST), types derived from `Link` headers at write time, strict 400/415 errors, and
+  authorization-filtered results.
 - **lws10-notifications** — webhook subscriptions, Activity Streams 2.0 envelopes, and
   **RFC 9421 HTTP Message Signatures** (ES256, key published in the storage description).
-- **Authorization surface** — 401 `WWW-Authenticate` challenges, access request/grant
-  endpoints, and **did:key self-issued JWT** credentials (Ed25519 + P-256).
+- **Authorization** — 401 `WWW-Authenticate` challenges, access request/grant endpoints, and a
+  real **ODRL access-grant engine** (actions, targets, `dateTime`/`client`/`mediaType`/`type`/
+  `purpose` constraints) driving read and write auth.
+- **Authn suites** — **did:key** (Ed25519 + P-256) and **CID** (subject-dereference) self-issued
+  JWT credentials.
 
-Not yet: the SAML/OpenID authn suites (need an external authorization server), the full
-OAuth token-exchange flow. See [CONFORMANCE.md](CONFORMANCE.md) §Findings for why.
+Not yet: the SAML/OpenID authn suites and the full OAuth token-exchange flow — all need an
+external authorization server. See [CONFORMANCE.md](CONFORMANCE.md) §Findings for why.
 
 ## Test suite
 
 ```bash
-# feature battery (47 checks)
-LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5 node index.js --no-auth &
-node test/conformance.js http://localhost:3126/lws
-
-# auth battery (6 checks — did:key + 401 challenge)
-DID=$(node test/auth.js --emit-did)
-LWS_WRITERS="$DID" node index.js &
-node test/auth.js http://localhost:3126/lws
+# all four batteries (72 checks) on scratch ports:
+JSS_BIN=$(command -v jss) npm test
 ```
+
+Individual batteries and their server configs are documented in [CONFORMANCE.md](CONFORMANCE.md).
 
 ## License
 

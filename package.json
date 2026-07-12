@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node test/conformance.js"
+    "test": "node test/run.js"
   },
   "repository": {
     "type": "git",
