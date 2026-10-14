@@ -22,7 +22,7 @@ JSS_BIN=$(command -v jss) npm test        # orchestrates all four on scratch por
 
 ## Implemented
 
-**lws10-core** — GET/HEAD (ETag, Content-Type, Link up/type/linkset/storageDescription),
+**lws10-core** — GET/HEAD (ETag, Content-Type, Link up/type/linkset/`lws#storage`),
 Range (RFC 7233), conditional GET (304); container representations as `application/lws+json`
 with conneg (lws+json / ld+json / json / **ld+json;profile**) and `Vary: Accept`;
 POST-to-create with Slug and container typing; PUT update-only (428/412/204/404); **content
@@ -57,6 +57,29 @@ as Bearer credentials. `none` rejected; `sub==iss==client_id`, `exp`/`iat` enfor
 Not implemented: the **OpenID** and **SAML** authn suites, and the full OAuth **token-exchange**
 authorization flow — all three require an external authorization server / identity provider,
 outside a storage server's scope (C11/C12). lws10-vocab publishing (a doc-gen concern).
+
+## Draft drift since July (`7832003` → 5 Oct 2026 WD and later)
+
+Tracked against [Touchstone](https://github.com/ebremer/touchstone), which baselines on the
+5 Oct core WD. Absorbed items are ticked; the rest are the upgrade list
+(JavaScriptSolidServer/JavaScriptSolidServer#621).
+
+- [x] **Storage discovery** (#183, #234, 21 Aug) — `rel="storageDescription"` → `rel="https://www.w3.org/ns/lws#storage"`
+  on every GET/HEAD (401s included); the storage URI itself answers the description as
+  `application/lws+cid`, a CID-1.0 document (`@context` = cid/v1 then lws/v1, `id` = storage URI,
+  a `StorageRoot` service). Here the storage URI is the root container, so it negotiates:
+  no Accept / `*/*` / `lws+cid` → description, `lws+json` → container. `/-/description` stays as an alias.
+- [x] Absolute `Location` on create.
+- [ ] **PATCH baseline: JSON Merge Patch → JSON Patch** (#255, 5 Oct) — content PATCH and linkset PATCH.
+- [ ] **did:key authn suite discontinued** (#229, 18 Sep); CID suite clarifies DID subjects (#233).
+  `didkey.js` becomes legacy; a `did:key` subject should go through the CID path.
+- [ ] **Search: GET/POST → HTTP QUERY** (#179); searchindex renamed lws10-index (#249).
+- [ ] **Auth discovery via RFC 9728 Protected Resource Metadata** (#256, 14 Oct); AS metadata
+  `subject_identifier_types_supported` (#227); token subject type metadata renamed (#221).
+- [ ] Notification envelopes: Activity Streams terms → dcterms + LWS (#219); core notification
+  model folded into lws10-core (#185).
+- [ ] Slug dropped from spec text (#224) — keep accepting it, stop relying on it in tests.
+- [ ] ETag language aligned with RFC 9110 (#228) — re-check 428/412/304 edge cases.
 
 ## Findings — spec observations (S) and host/plugin-API gaps (H)
 

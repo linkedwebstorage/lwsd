@@ -26,6 +26,8 @@ import { evaluate as evalGrants, HTTP_TO_ACTION } from './access.js'
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
 const LWS_JSON = 'application/lws+json'
+const LWS_CID = 'application/lws+cid'
+const CID_CONTEXT = 'https://www.w3.org/ns/cid/v1'
 const LINKSET_JSON = 'application/linkset+json'
 const MIME = {
   '.txt': 'text/plain', '.json': 'application/json', '.jsonld': 'application/ld+json',
@@ -85,7 +87,19 @@ export async function activate (api) {
 
   const baseUrl = (req) => config.baseUrl || `${req.protocol}://${req.headers.host}`
   const href = (req, urlPath) => baseUrl(req) + prefix + urlPath
+  // The canonical storage URI is the root container's URI (Discovery.html:
+  // the storage description is a CID document whose id is that URI, and the
+  // StorageRoot service points at the root container — here, the same URI).
   const storageId = (req) => href(req, '/')
+  const storageLink = (req) => `<${storageId(req)}>; rel="${LWS}storage"`
+  // Discovery.html: a request for the storage URI returns the description as
+  // application/lws+cid "unless content negotiation requires a different
+  // format" — so no Accept, */*, or an explicit lws+cid gets the description;
+  // a container media type gets the root container.
+  const wantsDescription = (req) => {
+    const a = req.headers.accept
+    return !a || /^\s*\*\/\*\s*(;[^,]*)?$/.test(a) || a.includes(LWS_CID)
+  }
 
   function resolvePath (urlPath) {
     const rel = decodeURIComponent(urlPath).replace(/^\/+/, '')
@@ -139,7 +153,7 @@ export async function activate (api) {
     const links = [
       `<${href(req, '/-/meta' + (urlPath || '/'))}>; rel="linkset"; type="${LINKSET_JSON}"`,
       `<${LWS}${isContainer ? 'Container' : 'DataResource'}>; rel="type"`,
-      `<${href(req, '/-/description')}>; rel="${LWS}storageDescription"`,
+      storageLink(req),
     ]
     const up = parentOf(urlPath)
     if (up !== null) links.push(`<${href(req, up)}>; rel="up"`)
@@ -266,6 +280,10 @@ export async function activate (api) {
   function challenge (reply, req) {
     reply.header('www-authenticate',
       `Bearer as_uri="${baseUrl(req)}", realm="${storageId(req)}", error="invalid_token"`)
+    // Discovery.html: the storage link is on every GET/HEAD response for a
+    // storage resource, a 401 included — a client with no credentials still
+    // has to find the storage (and from it the authorization server).
+    if (!reply.getHeader('link')) reply.header('link', storageLink(req))
   }
 
   async function agentOf (req) {
@@ -335,28 +353,36 @@ export async function activate (api) {
 
   // --- service routes under /-/ -------------------------------------------------
 
+  // Storage description (Discovery.html, 5 Oct 2026 draft): a CID-1.0
+  // document — @context starts with cid/v1 then lws/v1, id is the storage
+  // URI, type Storage, and the service set MUST contain a StorageRoot. Served
+  // as application/lws+cid at the storage URI itself (the root container,
+  // via conneg in the main route) and, as a stable alias, at /-/description.
+  function storageDescription (req, reply) {
+    const id = storageId(req)
+    const frag = notifier.descriptionFragment(id, href(req, '/-/subscriptions'))
+    reply.type(LWS_CID).header('link', storageLink(req))
+    // Serialized by hand: fastify only JSON-serializes objects for content
+    // types that contain "json", and lws+cid doesn't.
+    return JSON.stringify({
+      '@context': [CID_CONTEXT, CONTEXT],
+      id,
+      type: 'Storage',
+      verificationMethod: frag.verificationMethod,
+      authentication: frag.authentication,
+      service: [
+        { type: 'StorageRoot', serviceEndpoint: id },
+        ...frag.service,
+        { type: 'TypeIndexService', serviceEndpoint: href(req, '/-/types/index') },
+        { type: 'TypeSearchService', serviceEndpoint: href(req, '/-/types/search') },
+        { type: 'AccessRequestService', serviceEndpoint: href(req, '/-/access/requests'), conformsTo: [LWS + 'AccessProfile'] },
+        { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
+      ],
+    })
+  }
+
   async function serviceRoutes (req, reply, urlPath) {
-    // storage description (Discovery.html + service advertising)
-    if (urlPath === '/-/description') {
-      const id = storageId(req)
-      const frag = notifier.descriptionFragment(id, href(req, '/-/subscriptions'))
-      reply.type(negotiate(req)).header('link', `<${href(req, '/-/description')}>; rel="${LWS}storageDescription"`)
-      return {
-        '@context': CONTEXT,
-        id,
-        type: 'Storage',
-        verificationMethod: frag.verificationMethod,
-        authentication: frag.authentication,
-        service: [
-          { type: 'StorageDescription', serviceEndpoint: href(req, '/-/description') },
-          ...frag.service,
-          { type: 'TypeIndexService', serviceEndpoint: href(req, '/-/types/index') },
-          { type: 'TypeSearchService', serviceEndpoint: href(req, '/-/types/search') },
-          { type: 'AccessRequestService', serviceEndpoint: href(req, '/-/access/requests'), conformsTo: [LWS + 'AccessProfile'] },
-          { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
-        ],
-      }
-    }
+    if (urlPath === '/-/description') return storageDescription(req, reply)
 
     // linkset resources (Operations/metadata.md, RFC 9264)
     if (urlPath.startsWith('/-/meta/') || urlPath === '/-/meta') {
@@ -526,6 +552,13 @@ export async function activate (api) {
         }
         if (st.isDirectory()) {
           const cPath = urlPath.endsWith('/') ? urlPath : urlPath + '/'
+          // The storage URI is the root container: with no Accept, */*, or
+          // lws+cid it answers the storage description (Discovery.html).
+          if (cPath === '/' && wantsDescription(req)) {
+            reply.header('vary', 'Accept')
+            const desc = storageDescription(req, reply)
+            return req.method === 'HEAD' ? reply.send() : desc
+          }
           const etag = await containerEtag(abs)
           if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
           lwsHeaders(reply, req, cPath, true)
@@ -578,7 +611,10 @@ export async function activate (api) {
         recordLinks(childPath, req.headers.link, wantsContainer)
         emit(req, 'Create', childPath, wantsContainer, { target: href(req, base) })
         lwsHeaders(reply, req, childPath, wantsContainer)
-        reply.code(201).header('location', prefix + childPath)
+        // Absolute: a relative Location is legal (RFC 9110 §10.2.2) but
+        // every other URI this face emits is absolute, and harnesses that
+        // feed Location straight back as a URL don't all resolve it.
+        reply.code(201).header('location', href(req, childPath))
           .header('etag', wantsContainer ? await containerEtag(childAbs) : etagOf(cst))
         return reply.send()
       }

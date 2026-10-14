@@ -82,6 +82,21 @@ JSS_BIN=$(command -v jss) npm test
 
 Individual batteries and their server configs are documented in [CONFORMANCE.md](CONFORMANCE.md).
 
+### Touchstone
+
+[Touchstone](https://github.com/ebremer/touchstone) is the W3C LWS conformance harness (101
+tests over the 5 Oct 2026 drafts). `scripts/touchstone.sh` starts lwsd as an open target and
+runs it against `http://127.0.0.1:3456/lws/`, with Docker if present or a JDK 21+ build of
+the CLI jar otherwise; reports land in `.touchstone/runs/`.
+
+```bash
+npm run touchstone                       # all modules
+scripts/touchstone.sh --module core      # or auth, core/containers, one test id
+```
+
+It is a scoreboard, not a gate: exit 1 means a verdict was reached and it's non-conformant,
+which is expected while the drift list in CONFORMANCE.md has open items.
+
 ## License
 
 AGPL-3.0

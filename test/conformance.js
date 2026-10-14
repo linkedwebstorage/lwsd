@@ -19,7 +19,7 @@ const relOf = (r, rel) => new RegExp(`<([^>]+)>;\\s*rel="${rel.replace(/[#/]/g, 
 
 // ---- lws10-core -------------------------------------------------------------
 let r = await fetch(BASE + '/', { method: 'POST', headers: { slug: 'notes', link: '<https://www.w3.org/ns/lws#Container>; rel="type"' } })
-check('R6a', 'POST creates container: 201 + Location', r.status === 201 && !!r.headers.get('location'), `status ${r.status}`)
+check('R6a', 'POST creates container: 201 + absolute Location', r.status === 201 && r.headers.get('location') === BASE + '/notes/', `status ${r.status} location ${r.headers.get('location')}`)
 const notes = BASE + '/notes/'
 
 r = await fetch(notes, { method: 'POST', headers: { slug: 'list.txt', 'content-type': 'text/plain', link: '<https://schema.org/ItemList>; rel="type"' }, body: 'milk\neggs\n' })
@@ -33,7 +33,21 @@ r = await fetch(item)
 let etag = r.headers.get('etag')
 check('R1a', 'GET data: 200 + ETag + Content-Type', r.status === 200 && !!etag && (r.headers.get('content-type') || '').startsWith('text/plain'))
 check('R1b', 'GET data: up/type DataResource/linkset links', links(r).includes('rel="up"') && links(r).includes('lws#DataResource') && links(r).includes('rel="linkset"'))
-check('R10a', 'GET: storageDescription Link', links(r).includes('lws#storageDescription'))
+check('R10a', 'GET: lws#storage Link → storage URI', relOf(r, 'https://www.w3.org/ns/lws#storage') === BASE + '/')
+r = await fetch(item, { method: 'HEAD' })
+check('R10b', 'HEAD carries the same lws#storage Link', relOf(r, 'https://www.w3.org/ns/lws#storage') === BASE + '/')
+r = await fetch(BASE + '/', { headers: { accept: 'application/lws+cid' } })
+let desc = await r.json()
+check('R10c', 'Storage URI, Accept lws+cid: CID doc (cid/v1 + lws/v1 context, id = storage, StorageRoot service)',
+  r.status === 200 && (r.headers.get('content-type') || '').startsWith('application/lws+cid') &&
+  Array.isArray(desc['@context']) && desc['@context'][0] === 'https://www.w3.org/ns/cid/v1' && desc['@context'][1] === 'https://www.w3.org/ns/lws/v1' &&
+  desc.id === BASE + '/' && desc.type === 'Storage' &&
+  desc.service.some((s) => s.type === 'StorageRoot' && s.serviceEndpoint === BASE + '/'))
+r = await fetch(BASE + '/', { headers: { accept: '*/*' } })
+check('R10d', 'Storage URI, no preference: lws+cid by default', (r.headers.get('content-type') || '').startsWith('application/lws+cid'))
+r = await fetch(BASE + '/', { headers: { accept: 'application/lws+json' } })
+desc = await r.json()
+check('R10e', 'Storage URI, Accept lws+json: the root container', (r.headers.get('content-type') || '').startsWith('application/lws+json') && desc.type === 'Container')
 r = await fetch(item, { headers: { range: 'bytes=0-3' } })
 check('R2', 'Range: 206 + Content-Range', r.status === 206 && !!r.headers.get('content-range'))
 r = await fetch(item, { headers: { 'if-none-match': etag } })
