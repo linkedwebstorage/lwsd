@@ -11,7 +11,7 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**Conformance: 131 checks across 6 batteries** (`npm test`) over the current editors' drafts —
+**196 of 203 [Touchstone](https://github.com/ebremer/touchstone) tests pass (0 failed; see [Touchstone](#touchstone)). Own suite: 131 checks across 6 batteries** (`npm test`) over the current editors' drafts —
 core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
 See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
 of spec conflicts and host-API gaps the implementation surfaced (C1–C14).
@@ -113,9 +113,10 @@ scripts/touchstone.sh --module core      # or auth, core/containers, one test id
 Exit 1 means a verdict was reached and it's non-conformant; exit 2 means the harness produced no
 verdict (misconfigured or unreachable).
 
-**Status, 14 Oct 2026 — [Touchstone](https://github.com/ebremer/touchstone) `5c49679`, the W3C LWS
-conformance harness (5 Oct 2026 drafts): 196 passed, 0 failed, 0 cantTell, 7 inapplicable.
-Conformant.** Per specification module:
+**196 of 203 Touchstone tests pass — 0 failed, 0 cantTell, 7 inapplicable (3 SAML, 4 optional
+preconditions). Conformant.** [Touchstone](https://github.com/ebremer/touchstone) `5c49679` is the
+W3C LWS conformance harness over the 5 Oct 2026 drafts; 203 is its whole catalogue. 14 Oct 2026, per
+specification module:
 
 | Specification | Touchstone manifest | Passed | MUST | SHOULD | MAY |
 |---|---|---|---|---|---|
@@ -134,11 +135,11 @@ Conformant.** Per specification module:
 | **Authentication Suite: Self-signed Identity (CID)** — did:key and HTTPS subjects | `auth/cid` | **22 / 22** | 22 | – | – |
 | **Authentication Suite: OpenID Connect** | `auth/oidc` | **6 / 6** | 6 | – | – |
 | Authentication Suite: SAML 2.0 | `auth/saml` | not implemented | – | – | – |
-| **Total** | 15 manifests | **196 / 196** | 154 | 31 | 11 |
+| **Total** | 15 manifests | **196 / 203** | 154 | 31 | 11 |
 
-"Passed" is out of the tests that apply to this deployment; seven are inapplicable — three need SAML,
-four are preconditions for optional behaviour (`Content-Location` on search results, page links on
-a one-page listing or search, container access that does not reach members). Run it yourself with
+The seven that are not passes are inapplicable, not failures: three need SAML, four are preconditions
+for optional behaviour (`Content-Location` on search results, page links on a one-page listing or
+search, container access that does not reach members). Run it yourself with
 `scripts/touchstone.sh --auth`; the EARL report lands in `.touchstone/runs/`.
 
 Outside the harness's reach: notification envelopes still use the Activity Streams shape the
