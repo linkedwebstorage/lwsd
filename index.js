@@ -84,6 +84,20 @@ if (seed) {
   mkdirSync(options.root, { recursive: true })
   writeFileSync(indexFile, page)
 }
+// The todo app, served by the storage at /todo/ so a browser needs no
+// cross-origin or local-network permission to try it. Seeded the same way:
+// written when absent, left alone once someone edits it.
+const todoDir = join(options.root, 'todo')
+const todoFile = join(todoDir, 'index.html')
+if (!existsSync(todoFile)) {
+  mkdirSync(todoDir, { recursive: true })
+  writeFileSync(todoFile, readFileSync(join(__dirname, 'lws', 'todo.html'), 'utf8').replace(/\{\{PREFIX\}\}/g, options.prefix))
+  // JSS: a public-read ACL for the app's container (same shape JSS seeds for index.html).
+  writeFileSync(join(todoDir, '.acl'), JSON.stringify({
+    '@context': { acl: 'http://www.w3.org/ns/auth/acl#', foaf: 'http://xmlns.com/foaf/0.1/' },
+    '@graph': [{ '@id': '#public', '@type': 'acl:Authorization', 'acl:agentClass': { '@id': 'foaf:Agent' }, 'acl:accessTo': { '@id': './' }, 'acl:default': { '@id': './' }, 'acl:mode': [{ '@id': 'acl:Read' }] }],
+  }, null, 2))
+}
 
 const jss = spawn('jss', jssArgs, {
   stdio: 'inherit',

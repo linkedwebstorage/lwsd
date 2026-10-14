@@ -94,6 +94,15 @@ with ECDSA (`ES256K`) instead of Schnorr — same key, same person, no registrat
 takes hex or an `nsec`. The server verifies `ES256K` credentials for secp256k1 did:keys alongside
 Ed25519 and P-256.
 
+## Todo app
+
+`/todo/` on a running lwsd is a one-file todo app served by the storage itself: it makes a P-256 key
+in your browser, finds the authorization server from the 401, exchanges a did:key credential for an
+access token, and keeps each todo as a JSON resource in `todos/` (POST, JSON Patch with `If-Match`,
+DELETE), showing every request as it goes. The same file is at
+<https://linkedwebstorage.com/todo/>, where the Storage field can point at any LWS server — a
+browser asks once before a public page may reach `localhost`. Source: [`lws/todo.html`](lws/todo.html).
+
 ## Test suite
 
 ```bash

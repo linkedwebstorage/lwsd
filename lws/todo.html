@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Todo on Linked Web Storage</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* A todo list that lives in an LWS storage. Same palette as the lwsd
+     welcome page; two columns: the list, and what the app is saying to the
+     server. Single file, no build, no dependencies. */
+  :root {
+    --bg: #f6f7f4; --surface: #fff; --ink: #15201d; --muted: #5f6d68; --line: #dfe4e0;
+    --accent: #0f6f6a; --accent-soft: #e3f1ef; --warm: #b9562a; --ok: #2f8f5b; --bad: #b3261e;
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --body: "IBM Plex Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 var(--body); -webkit-font-smoothing: antialiased;
+    padding-block: 0 3rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--mono); font-size: .9em; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .wrap { max-width: 64rem; margin: 0 auto; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding-block: 1.1rem; border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 600; } .brand span { color: var(--muted); font-weight: 400; }
+  .who { display: flex; align-items: center; gap: .6rem; font-size: .85rem; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 4px rgba(47,143,91,.15); } .dot.bad { background: var(--bad); }
+  h1 { font-family: var(--display); font-weight: 400; font-variation-settings: "opsz" 144; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1.05; letter-spacing: -.015em; margin: 2.5rem 0 .5rem; text-wrap: balance; }
+  h1 em { font-style: italic; color: var(--accent); }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 60ch; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.25rem; align-items: start; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
+  .panel h2 { font: 600 .78rem/1 var(--body); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0; padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+  .panel h2 .n { color: var(--warm); font-family: var(--mono); font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+  form.add { display: flex; gap: .5rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); }
+  form.add input { flex: 1; min-width: 0; font: inherit; padding: .65rem .85rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  form.add input:focus { border-color: var(--accent); background: #fff; outline: none; }
+  button { font: 600 .9rem/1 var(--body); cursor: pointer; border: 0; border-radius: 8px; padding: .65rem 1rem; background: var(--accent); color: #fff; }
+  button:hover { filter: brightness(1.08); } button[disabled] { opacity: .5; cursor: default; }
+  button.quiet { background: transparent; color: var(--muted); padding: .35rem .5rem; font-weight: 500; } button.quiet:hover { color: var(--bad); filter: none; }
+
+  ul.todos { list-style: none; margin: 0; padding: .25rem 0; }
+  ul.todos li { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .75rem; padding: .6rem 1.25rem; border-bottom: 1px solid var(--line); }
+  ul.todos li:last-child { border-bottom: 0; }
+  ul.todos input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+  ul.todos .title { min-width: 0; overflow-wrap: anywhere; }
+  ul.todos li.done .title { color: var(--muted); } ul.todos li.done .text { text-decoration: line-through; }
+  ul.todos .uri { display: block; font-family: var(--mono); font-size: .72rem; color: var(--muted); overflow-wrap: anywhere; }
+  .empty { padding: 1.5rem 1.25rem; color: var(--muted); font-style: italic; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: .4rem .9rem; padding: 1rem 1.25rem; font-size: .88rem; border-bottom: 1px solid var(--line); align-items: baseline; }
+  .kv dt { color: var(--muted); white-space: nowrap; } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .kv input { width: 100%; font: inherit; font-family: var(--mono); font-size: .85rem; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+  .log { margin: 0; padding: .75rem 1.25rem; list-style: none; font-family: var(--mono); font-size: .78rem; line-height: 1.5; max-height: 26rem; overflow: auto; }
+  .log li { display: grid; grid-template-columns: 3.2rem 1fr 2.6rem; gap: .6rem; padding: .15rem 0; border-bottom: 1px dashed var(--line); }
+  .log .m { color: var(--accent); font-weight: 500; } .log .s { text-align: right; color: var(--ok); } .log .s.bad { color: var(--bad); } .log .s.wait { color: var(--muted); }
+  .log .u { color: var(--ink); overflow-wrap: anywhere; } .log .note { grid-column: 2 / 4; color: var(--muted); }
+  .err { margin: 1rem 0 0; padding: .75rem 1rem; background: #fdf0ee; border: 1px solid #f1c9c4; color: var(--bad); border-radius: 8px; font-size: .9rem; }
+  footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .85rem; color: var(--muted); display: flex; gap: 1.5rem; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <div class="brand">Todo <span>on Linked Web Storage</span></div>
+    <div class="who"><span class="dot" id="dot"></span><span id="who">starting…</span></div>
+  </div>
+
+  <h1>Your list, in <em>your</em> storage.</h1>
+  <p class="lede">Each todo is a JSON resource in a container on an LWS server — by default one on your machine (<code>npx lwsd</code>), or any other you point it at. This page holds a key it generated, trades it for an access token at the server's authorization server, and talks plain HTTP from there. The right-hand panel shows every request as it happens.</p>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>Todos <span class="n" id="count"></span></h2>
+      <form class="add" id="add">
+        <input id="title" placeholder="Something to do" autocomplete="off" required>
+        <button type="submit" id="addbtn">Add</button>
+      </form>
+      <ul class="todos" id="list"></ul>
+      <div class="empty" id="empty" hidden>Nothing yet. Add the first one.</div>
+    </section>
+
+    <aside>
+      <section class="panel">
+        <h2>Connection</h2>
+        <dl class="kv">
+          <dt>Storage</dt><dd><input id="storage" class="mono" spellcheck="false"></dd>
+          <dt>Container</dt><dd id="container" class="mono">—</dd>
+          <dt>Identity</dt><dd id="did" class="mono">—</dd>
+          <dt>Token</dt><dd id="token">—</dd>
+        </dl>
+        <h2>Requests</h2>
+        <ol class="log" id="log"></ol>
+      </section>
+    </aside>
+  </div>
+  <div class="err" id="err" hidden></div>
+
+  <footer>
+    <a href="/">This server</a>
+    <a href="https://linkedwebstorage.com/">linkedwebstorage.com</a>
+    <a href="https://github.com/linkedwebstorage/lwsd/blob/gh-pages/lws/todo.html">Source (one file)</a>
+    <span>Run a server with <code>npx lwsd</code>, or point Storage at any LWS server. Key stays in this browser's localStorage; nothing else is stored anywhere but the server above.</span>
+  </footer>
+</div>
+
+<script>
+(async function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const b64uToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  const utf8 = (s) => new TextEncoder().encode(s);
+
+  // ---------- request log ----------
+  const log = $('log');
+  function note (text) { const li = document.createElement('li'); li.innerHTML = `<span></span><span class="note"></span>`; li.lastChild.textContent = text; log.prepend(li); }
+  async function req (method, url, opts = {}, label) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="m"></span><span class="u"></span><span class="s wait">…</span>`;
+    li.children[0].textContent = method; li.children[1].textContent = label || url.replace(storageUrl(), '…/');
+    log.prepend(li);
+    try {
+      const r = await fetch(url, { ...opts, method });
+      li.children[2].textContent = r.status; li.children[2].className = 's' + (r.ok ? '' : ' bad');
+      return r;
+    } catch (e) { li.children[2].textContent = 'net'; li.children[2].className = 's bad'; throw e; }
+  }
+
+  // ---------- identity: a P-256 key in this browser, as a did:key ----------
+  const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function b58 (bytes) { let n = 0n; for (const b of bytes) n = (n << 8n) | BigInt(b); let s = ''; while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; } for (const b of bytes) { if (b === 0) s = '1' + s; else break; } return s; }
+  function didKeyOf (jwk) { const x = b64uToBytes(jwk.x), y = b64uToBytes(jwk.y); const bytes = new Uint8Array(3 + 32); bytes.set([0x80, 0x24, 0x02 | (y[31] & 1)]); bytes.set(x, 3); return 'did:key:z' + b58(bytes); }
+  let keyPair, did;
+  async function loadKey () {
+    let jwk = null; try { jwk = JSON.parse(localStorage.getItem('lws-todo-key')); } catch {}
+    if (!jwk) {
+      const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+      jwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
+      try { localStorage.setItem('lws-todo-key', JSON.stringify(jwk)); } catch {}
+      note('generated a new P-256 key for this browser');
+    }
+    const priv = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    keyPair = { priv, jwk }; did = didKeyOf(jwk);
+    $('did').textContent = did;
+  }
+  async function selfIssued (aud) {
+    const now = Math.floor(Date.now() / 1000);
+    const h = b64u(utf8(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid: did.slice(8) })));
+    const p = b64u(utf8(JSON.stringify({ sub: did, iss: did, client_id: did, aud, iat: now, exp: now + 300, jti: crypto.randomUUID() })));
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keyPair.priv, utf8(h + '.' + p));
+    return `${h}.${p}.${b64u(sig)}`;
+  }
+
+  // ---------- storage + authorization server ----------
+  const storageUrl = () => $('storage').value.trim().replace(/\/?$/, '/');
+  let token = null, tokenExp = 0, as = null;
+  async function discover () {
+    const r = await req('POST', storageUrl(), {}, 'anonymous probe → 401 challenge');
+    const wa = r.headers.get('www-authenticate') || '';
+    const asUri = /as_uri="([^"]+)"/.exec(wa)?.[1];
+    if (r.status !== 401 || !asUri) throw new Error(`expected a 401 with as_uri from ${storageUrl()}, got ${r.status}`);
+    const u = new URL(asUri);
+    const meta = await (await req('GET', `${u.origin}/.well-known/lws-configuration${u.pathname.replace(/\/$/, '')}`, {}, 'AS metadata')).json();
+    as = { issuer: meta.issuer, tokenEndpoint: meta.token_endpoint, realm: /realm="([^"]+)"/.exec(wa)?.[1] || storageUrl() };
+  }
+  async function getToken () {
+    if (token && Date.now() / 1000 < tokenExp - 30) return token;
+    if (!as) await discover();
+    const body = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange', resource: as.realm, subject_token: await selfIssued(as.issuer), subject_token_type: 'urn:ietf:params:oauth:token-type:jwt' });
+    const r = await req('POST', as.tokenEndpoint, { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }, 'token exchange (did:key → at+jwt)');
+    const j = await r.json();
+    if (!r.ok) throw new Error(`token exchange failed: ${j.error} ${j.error_description || ''}`);
+    token = j.access_token; tokenExp = Date.now() / 1000 + (j.expires_in || 300);
+    $('token').textContent = `at+jwt, expires in ${j.expires_in}s`;
+    return token;
+  }
+  const authed = async (method, url, opts = {}, label) => req(method, url, { ...opts, headers: { ...(opts.headers || {}), authorization: 'Bearer ' + await getToken() } }, label);
+
+  // ---------- the todos container ----------
+  const container = () => storageUrl() + 'todos/';
+  async function ensureContainer () {
+    const r = await req('HEAD', container(), {}, 'todos/ exists?');
+    if (r.ok) return;
+    const c = await authed('POST', storageUrl(), { headers: { slug: 'todos', link: '<https://www.w3.org/ns/lws#Container>; rel="type"' } }, 'create todos/');
+    if (!c.ok) throw new Error(`could not create ${container()}: ${c.status}`);
+  }
+  let todos = [];
+  async function load () {
+    const r = await req('GET', container(), { headers: { accept: 'application/lws+json' } }, 'list todos/');
+    const page = await r.json();
+    const items = (page.items || []).filter((i) => i.type === 'DataResource' && /\.json$/.test(i.id));
+    todos = await Promise.all(items.map(async (i) => {
+      const url = new URL(i.id, container()).href;
+      const g = await req('GET', url, { headers: { accept: 'application/json' } });
+      return { url, etag: g.headers.get('etag'), ...(await g.json()) };
+    }));
+    todos.sort((a, b) => (a.created || '').localeCompare(b.created || ''));
+    render();
+  }
+  async function add (title) {
+    const body = JSON.stringify({ title, done: false, created: new Date().toISOString() });
+    const r = await authed('POST', container(), { headers: { 'content-type': 'application/json', slug: `${Date.now().toString(36)}.json`, link: '<https://schema.org/Action>; rel="type"' }, body }, 'create a todo');
+    if (!r.ok) throw new Error(`create failed: ${r.status}`);
+    await load();
+  }
+  async function toggle (t) {
+    const patch = JSON.stringify([{ op: 'test', path: '/done', value: t.done }, { op: 'replace', path: '/done', value: !t.done }]);
+    const r = await authed('PATCH', t.url, { headers: { 'content-type': 'application/json-patch+json', 'if-match': t.etag }, body: patch }, (t.done ? 'reopen' : 'complete') + ' (JSON Patch, If-Match)');
+    if (r.status === 412) { note('someone else changed it first — reloading'); return load(); }
+    if (!r.ok) throw new Error(`patch failed: ${r.status}`);
+    await load();
+  }
+  async function remove (t) {
+    const r = await authed('DELETE', t.url, {}, 'delete a todo');
+    if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+    await load();
+  }
+
+  // ---------- UI ----------
+  function render () {
+    const ul = $('list'); ul.textContent = '';
+    for (const t of todos) {
+      const li = document.createElement('li'); if (t.done) li.className = 'done';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!t.done; cb.setAttribute('aria-label', 'done');
+      cb.addEventListener('change', () => guard(() => toggle(t)));
+      const title = document.createElement('span'); title.className = 'title'; const text = document.createElement('span'); text.className = 'text'; text.textContent = t.title || '(untitled)'; title.appendChild(text);
+      const uri = document.createElement('span'); uri.className = 'uri'; uri.textContent = t.url.replace(storageUrl(), '…/'); title.appendChild(uri);
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'quiet'; del.textContent = 'Delete'; del.addEventListener('click', () => guard(() => remove(t)));
+      li.append(cb, title, del); ul.appendChild(li);
+    }
+    $('empty').hidden = todos.length > 0;
+    const open = todos.filter((t) => !t.done).length;
+    $('count').textContent = todos.length ? `${open} open · ${todos.length - open} done` : '';
+  }
+  async function guard (fn) {
+    $('err').hidden = true;
+    try { await fn(); } catch (e) { $('err').textContent = e.message; $('err').hidden = false; $('dot').className = 'dot bad'; }
+  }
+  $('add').addEventListener('submit', (e) => {
+    e.preventDefault(); const v = $('title').value.trim(); if (!v) return;
+    $('addbtn').disabled = true;
+    guard(() => add(v)).then(() => { $('title').value = ''; $('addbtn').disabled = false; $('title').focus(); });
+  });
+  $('storage').addEventListener('change', () => { as = null; token = null; boot(); });
+
+  async function boot () {
+    $('dot').className = 'dot'; $('who').textContent = 'connecting…';
+    $('container').textContent = container();
+    await guard(async () => {
+      await loadKey();
+      await ensureContainer();
+      await load();
+      $('dot').className = 'dot on'; $('who').textContent = `connected as ${did.slice(0, 20)}…`;
+    });
+  }
+  $('storage').value = localStorage.getItem('lws-todo-storage') || (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) ? location.origin + '{{PREFIX}}/' : 'http://localhost:3126/lws/');
+  $('storage').addEventListener('change', () => { try { localStorage.setItem('lws-todo-storage', storageUrl()); } catch {} });
+  boot();
+})();
+</script>
+</body>
+</html>
