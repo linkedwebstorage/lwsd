@@ -29,7 +29,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MODULE=all
-PORT=3456
+PORT=auto
 # master's Dockerfile omits the harness-clients module added in 7b13c27
 # (ebremer/touchstone#2, fix in #3). Last commit before that. Move to master
 # or a tag once the fix has landed.
@@ -53,6 +53,14 @@ done
 
 JSS_BIN=${JSS_BIN:-$ROOT/node_modules/.bin/jss}
 command -v "$JSS_BIN" >/dev/null 2>&1 || JSS_BIN=jss
+# jss moves to another port when the requested one is busy (Vite-style), and
+# the harness would then test whatever else is on --port. Default to a free
+# one; an explicit --port is checked and refused if taken.
+if [ "$PORT" = auto ]; then
+  PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
+elif curl -s -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
+  echo "port $PORT is already in use; pick another with --port" >&2; exit 2
+fi
 SRC="$ROOT/.touchstone/src"
 WORK=$(mktemp -d -t lwsd-touchstone.XXXXXX)
 DATA="$WORK/data"

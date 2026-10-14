@@ -11,7 +11,7 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**Conformance: 72 checks across 4 batteries** (`npm test`) over the current editors' drafts —
+**Conformance: 88 checks across 4 batteries** (`npm test`) over the current editors' drafts —
 core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
 See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
 of spec conflicts and host-API gaps the implementation surfaced (C1–C14).
@@ -86,7 +86,7 @@ Individual batteries and their server configs are documented in [CONFORMANCE.md]
 
 [Touchstone](https://github.com/ebremer/touchstone) is the W3C LWS conformance harness (101
 tests over the 5 Oct 2026 drafts). `scripts/touchstone.sh` starts lwsd as an open target and
-runs it against `http://127.0.0.1:3456/lws/`, with Docker if present or a JDK 21+ build of
+runs it against `/lws/` on a free port, with Docker if present or a JDK 21+ build of
 the CLI jar otherwise; reports land in `.touchstone/runs/`.
 
 ```bash

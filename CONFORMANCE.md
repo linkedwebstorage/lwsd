@@ -7,11 +7,11 @@ lws10-authn-ssi-did-key, and lws10-authn-ssi-cid.
 Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js`, `didkey.js`,
 `jwt.js`) as a JSS plugin (jss ≥ 0.0.219).
 
-## Batteries — `npm test` runs all four (72 checks)
+## Batteries — `npm test` runs all four (88 checks)
 
 | Battery | Checks | Server config | Covers |
 |---|---|---|---|
-| `conformance.js` | 51 | `LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5` | core, pagination, content PATCH, type index/search (+ strict 400/415 errors + ld+json profile), notifications with RFC 9421 signature *verification* |
+| `conformance.js` | 67 | `LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5` | core, pagination, content PATCH, type index/search (+ strict 400/415 errors + ld+json profile), notifications with RFC 9421 signature *verification* |
 | `auth.js` | 6 | `LWS_WRITERS=<did:key>` | 401 challenge + did:key self-issued JWT accept/reject |
 | `cid.js` | 3 | `LWS_WRITERS=<sub> LWS_CID_ALLOW_LOOPBACK=1` | CID self-issued JWT: dereference `sub` → controlled identifier doc → verify |
 | `grants.js` | 12 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<admin>` | ODRL access-grant engine: read-gating, foaf:Agent public grants, action scoping, dateTime constraints, authz-filtered search |
@@ -70,7 +70,15 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   a `StorageRoot` service). Here the storage URI is the root container, so it negotiates:
   no Accept / `*/*` / `lws+cid` → description, `lws+json` → container. `/-/description` stays as an alias.
 - [x] Absolute `Location` on create.
-- [ ] **PATCH baseline: JSON Merge Patch → JSON Patch** (#255, 5 Oct) — content PATCH and linkset PATCH.
+- [x] **PATCH baseline: JSON Merge Patch → JSON Patch** (#255, 5 Oct) — `lws/jsonpatch.js` (RFC 6902
+  over RFC 6901, all-or-nothing); content PATCH and linkset PATCH take `application/json-patch+json`
+  and still take merge-patch; `Accept-Patch` lists both. Linkset patches apply to the RFC 9264
+  document and the user-managed relations are read back out of the first link context, so
+  server-managed `up`/`type` can't be forged; linksets now carry an ETag, 412 on a stale `If-Match`,
+  and 405 + `Allow` for PUT.
+- [x] Data resources serve the `Content-Type` they were created/updated with (`format` in container
+  items, per container-representation.md), not a guess from the extension; `Last-Modified` with
+  `If-Modified-Since` / `If-Unmodified-Since`; `Allow` on 405s.
 - [ ] **did:key authn suite discontinued** (#229, 18 Sep); CID suite clarifies DID subjects (#233).
   `didkey.js` becomes legacy; a `did:key` subject should go through the CID path.
 - [ ] **Search: GET/POST → HTTP QUERY** (#179); searchindex renamed lws10-index (#249).

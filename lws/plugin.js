@@ -22,6 +22,7 @@ import { Notifier } from './notify.js'
 import { verifySelfIssuedJwt } from './didkey.js'
 import { verifyCidJwt } from './cidauth.js'
 import { evaluate as evalGrants, HTTP_TO_ACTION } from './access.js'
+import { apply as applyJsonPatch, PatchError } from './jsonpatch.js'
 
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
@@ -36,6 +37,27 @@ const MIME = {
 }
 // Structural/protocol relations are never indexed as descriptive relations.
 const STRUCTURAL_RELS = new Set(['type', 'up', 'linkset', 'storagedescription', 'self', 'first', 'next', 'prev', 'last'])
+
+// update-resource.md / metadata.md (5 Oct 2026): JSON Patch is the baseline
+// every server MUST take; JSON Merge Patch stays as an advertised alternative.
+const JSON_PATCH = 'application/json-patch+json'
+const MERGE_PATCH = 'application/merge-patch+json'
+const PATCH_TYPES = [JSON_PATCH, MERGE_PATCH]
+const ACCEPT_PATCH = PATCH_TYPES.join(', ')
+
+// RFC 7396 merge: null deletes, objects recurse, anything else replaces.
+const mergePatch = (t, p) => {
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) return p
+  const out = (t && typeof t === 'object' && !Array.isArray(t)) ? { ...t } : {}
+  for (const [k, v] of Object.entries(p)) { if (v === null) delete out[k]; else out[k] = mergePatch(out[k], v) }
+  return out
+}
+// Throws PatchError (400 malformed, 409 refused) so callers answer uniformly.
+function applyPatch (doc, mediaType, body) {
+  if (mediaType === JSON_PATCH) return applyJsonPatch(doc, body)
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new PatchError(400, 'a JSON Merge Patch document is an object')
+  return mergePatch(doc, body)
+}
 
 const problem = (reply, status, title, detail) =>
   reply.code(status).type('application/problem+json')
@@ -196,7 +218,7 @@ export async function activate (api) {
         : {
             type: 'DataResource',
             id: prefix + urlPath + d.name,
-            mediaType: MIME[path.extname(d.name)] || 'application/octet-stream',
+            format: formatOf(urlPath + d.name, d.name),
             size: st.size,
             modified: st.mtime.toISOString(),
           })
@@ -207,7 +229,11 @@ export async function activate (api) {
   // --- type index (lws10-searchindex) ----------------------------------------
 
   // Record types/relations declared via Link headers at write time.
-  function recordLinks (urlPath, linkHeader, isContainer) {
+  // `format` is the Content-Type the client sent on create/update: a data
+  // resource serves the bytes it was given under the media type it was
+  // given, whatever its name looks like. The extension map is only the
+  // fallback for files that arrived some other way.
+  function recordLinks (urlPath, linkHeader, isContainer, format) {
     const entry = { types: [LWS + (isContainer ? 'Container' : 'DataResource')], rels: {} }
     for (const { href: target, rel } of parseLinks(linkHeader)) {
       if (rel === 'type') {
@@ -216,9 +242,21 @@ export async function activate (api) {
         (entry.rels[rel] = entry.rels[rel] || []).push(target)
       }
     }
+    const fmt = format || typeIndex[urlPath]?.format
+    if (fmt) entry.format = fmt
     typeIndex[urlPath] = entry
     saveTypeIndex().catch(() => {})
   }
+  function setFormat (urlPath, format) {
+    if (!format) return
+    const entry = typeIndex[urlPath] || { types: [LWS + 'DataResource'], rels: {} }
+    entry.format = format
+    typeIndex[urlPath] = entry
+    saveTypeIndex().catch(() => {})
+  }
+  const mediaTypeOf = (req) => (req.headers['content-type'] || '').split(';')[0].trim() || undefined
+  const formatOf = (urlPath, name) =>
+    typeIndex[urlPath]?.format || MIME[path.extname(name)] || 'application/octet-stream'
   function unrecord (urlPath) {
     for (const k of Object.keys(typeIndex)) {
       if (k === urlPath || k.startsWith(urlPath.endsWith('/') ? urlPath : urlPath + '/')) delete typeIndex[k]
@@ -392,30 +430,68 @@ export async function activate (api) {
       let st; try { st = await fs.stat(abs) } catch { return problem(reply, 404, 'Not Found') }
       const isC = st.isDirectory()
       const anchor = href(req, target === '/' ? '/' : target + (isC && !target.endsWith('/') ? '/' : ''))
+      // Server-managed relations are derived from the resource on every
+      // read and never stored; a patch that touches them is ignored rather
+      // than refused (metadata.md lets servers "restrict modifications to
+      // specific links … to maintain system integrity").
+      const MANAGED = ['anchor', 'type', 'up', 'linkset', 'format', 'mediaType', 'size', 'modified', 'items']
+      const render = async () => {
+        const user = await userLinks(target)
+        const entry = { anchor, type: [{ href: LWS + (isC ? 'Container' : 'DataResource') }] }
+        const up = parentOf(target)
+        if (up !== null) entry.up = [{ href: href(req, up) }]
+        for (const [rel, hrefs] of Object.entries(user)) entry[rel] = [].concat(hrefs).map((h) => ({ href: h }))
+        return { linkset: [entry] }
+      }
+      const linksetEtag = (d) => `"${createHash('sha1').update(JSON.stringify(d)).digest('hex').slice(0, 16)}"`
+      const doc = await render()
+      const etag = linksetEtag(doc)
+      const ALLOW = 'GET, HEAD, PATCH, OPTIONS' // no PUT: metadata.md makes it optional, and we say so
+      if (req.method === 'OPTIONS') {
+        reply.header('allow', ALLOW).header('accept-patch', ACCEPT_PATCH).code(204); return reply.send()
+      }
       if (req.method === 'PATCH') {
-        if ((req.headers['content-type'] || '').split(';')[0] !== 'application/merge-patch+json') {
-          return problem(reply, 415, 'Unsupported Media Type', 'use application/merge-patch+json')
+        const ct = mediaTypeOf(req)
+        if (!PATCH_TYPES.includes(ct)) {
+          reply.header('accept-patch', ACCEPT_PATCH)
+          return problem(reply, 415, 'Unsupported Media Type', `use ${ACCEPT_PATCH}`)
         }
         if (!await authorizeWrite(req, reply, target)) return
-        const cur = await userLinks(target)
-        for (const [k, v] of Object.entries(req.body || {})) {
-          if (['linkset', 'type', 'mediaType', 'size', 'modified', 'up', 'items'].includes(k)) {
-            return problem(reply, 409, 'Conflict', `link relation '${k}' is server-managed`)
-          }
-          if (v === null) delete cur[k]; else cur[k] = v
+        const ifMatch = req.headers['if-match']
+        if (ifMatch && ifMatch !== etag && ifMatch !== '*') {
+          return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
+        }
+        // The patch is applied to the linkset document as the client sees it
+        // (RFC 9264 shape), then the user-managed relations are read back out
+        // of the first link context — so a JSON Patch can add one link and
+        // leave the rest alone, while a merge patch replaces the array.
+        let next
+        try { next = applyPatch(doc, ct, req.body) } catch (e) {
+          if (!(e instanceof PatchError)) throw e
+          return problem(reply, e.status, e.status === 400 ? 'Bad Request' : 'Conflict', e.message)
+        }
+        const entry = Array.isArray(next?.linkset) ? next.linkset[0] : null
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return problem(reply, 409, 'Conflict', 'the patch does not leave a linkset document behind')
+        }
+        const cur = {}
+        for (const [rel, targets] of Object.entries(entry)) {
+          if (MANAGED.includes(rel)) continue
+          const hrefs = [].concat(targets ?? []).map((t) => typeof t === 'string' ? t : t?.href).filter((h) => typeof h === 'string')
+          if (hrefs.length) cur[rel] = hrefs
         }
         await fs.writeFile(metaFile(target), JSON.stringify(cur))
         emit(req, 'Update', target, isC)
-        reply.code(204); return reply.send()
+        reply.code(204).header('etag', linksetEtag(await render())); return reply.send()
       }
-      const user = await userLinks(target)
-      const entry = { anchor, type: [{ href: LWS + (isC ? 'Container' : 'DataResource') }] }
-      const up = parentOf(target)
-      if (up !== null) entry.up = [{ href: href(req, up) }]
-      for (const [rel, hrefs] of Object.entries(user)) entry[rel] = [].concat(hrefs).map((h) => ({ href: h }))
-      reply.type(LINKSET_JSON).header('allow', 'GET, HEAD, PATCH')
-        .header('accept-patch', 'application/merge-patch+json')
-      return { linkset: [entry] }
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        reply.header('allow', ALLOW)
+        return problem(reply, 405, 'Method Not Allowed', 'a linkset takes GET, HEAD and PATCH')
+      }
+      reply.type(LINKSET_JSON).header('allow', ALLOW).header('accept-patch', ACCEPT_PATCH)
+        .header('etag', etag).header('link', storageLink(req))
+      if (req.method === 'HEAD') return reply.send()
+      return doc
     }
 
     // notification subscriptions (lws10-notifications)
@@ -509,9 +585,12 @@ export async function activate (api) {
           reply.code(201).header('location', obj.id).type(LWS_JSON)
           return { '@context': CONTEXT, ...obj }
         }
-        const items = Object.keys(access[kind]).map((id) => ({ type: 'DataResource', id: prefix + `${base}/${id}`, mediaType: LWS_JSON }))
+        const items = Object.keys(access[kind]).map((id) => ({ type: 'DataResource', id: prefix + `${base}/${id}`, format: LWS_JSON }))
         const paged = paginate(reply, req, base, items)
-        reply.type(LWS_JSON)
+        // The endpoint is an LWS container (lws-access-requests.html), so it
+        // carries the container type and the storage link like any other.
+        const pageLinks = reply.getHeader('link')
+        reply.type(LWS_JSON).header('link', [`<${LWS}Container>; rel="type"`, storageLink(req), pageLinks].filter(Boolean).join(', '))
         return { '@context': CONTEXT, id: prefix + base, type: 'Container', totalItems: paged.total, items: paged.items }
       }
       if (urlPath.startsWith(base + '/')) {
@@ -570,9 +649,16 @@ export async function activate (api) {
         }
         const etag = etagOf(st)
         if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
+        // Date validators alongside the ETag (RFC 9110 §13.1.3/§13.1.4):
+        // Last-Modified at one-second precision, so compare at that precision.
+        const mtimeSec = Math.floor(st.mtimeMs / 1000)
+        const since = (h) => { const t = Date.parse(req.headers[h] || ''); return isNaN(t) ? null : Math.floor(t / 1000) }
+        const ims = since('if-modified-since'); const ius = since('if-unmodified-since')
+        if (ius !== null && mtimeSec > ius) return problem(reply, 412, 'Precondition Failed', 'modified since the given date')
+        if (ims !== null && !req.headers['if-none-match'] && mtimeSec <= ims) { reply.code(304); return reply.send() }
         lwsHeaders(reply, req, urlPath, false)
-        reply.header('etag', etag).header('accept-ranges', 'bytes')
-          .type(MIME[path.extname(abs)] || 'application/octet-stream')
+        reply.header('etag', etag).header('last-modified', st.mtime.toUTCString()).header('accept-ranges', 'bytes')
+          .type(formatOf(urlPath, abs))
         const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '')
         if (range && (range[1] || range[2])) {
           const start = range[1] ? parseInt(range[1], 10) : st.size - parseInt(range[2], 10)
@@ -590,7 +676,10 @@ export async function activate (api) {
 
       case 'POST': { // create in container (Operations/create-resource.md)
         if (!st) return problem(reply, 404, 'Not Found', 'target container does not exist')
-        if (!st.isDirectory()) return problem(reply, 405, 'Method Not Allowed', 'POST targets a container')
+        if (!st.isDirectory()) {
+          reply.header('allow', 'GET, HEAD, PUT, PATCH, DELETE, OPTIONS')
+          return problem(reply, 405, 'Method Not Allowed', 'POST targets a container')
+        }
         if (!await authorizeWrite(req, reply, urlPath)) return
         const wantsContainer = parseLinks(req.headers.link).some((l) => l.rel === 'type' && l.href === LWS + 'Container')
         let name = (req.headers.slug || '').replace(/[^\w.\- ]/g, '').trim() ||
@@ -608,7 +697,7 @@ export async function activate (api) {
         if (wantsContainer) await fs.mkdir(childAbs)
         else await fs.writeFile(childAbs, req.body ?? '')
         const cst = await fs.stat(childAbs)
-        recordLinks(childPath, req.headers.link, wantsContainer)
+        recordLinks(childPath, req.headers.link, wantsContainer, wantsContainer ? undefined : (mediaTypeOf(req) || 'application/octet-stream'))
         emit(req, 'Create', childPath, wantsContainer, { target: href(req, base) })
         lwsHeaders(reply, req, childPath, wantsContainer)
         // Absolute: a relative Location is legal (RFC 9110 §10.2.2) but
@@ -632,21 +721,22 @@ export async function activate (api) {
           return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
         await fs.writeFile(abs, req.body ?? '')
-        if (req.headers.link) recordLinks(urlPath, req.headers.link, false)
+        if (req.headers.link) recordLinks(urlPath, req.headers.link, false, mediaTypeOf(req))
+        else setFormat(urlPath, mediaTypeOf(req))
         emit(req, 'Update', urlPath, false)
         reply.code(204).header('etag', etagOf(await fs.stat(abs)))
         return reply.send()
       }
 
-      case 'PATCH': { // partial content update — merge-patch for JSON resources
+      case 'PATCH': { // partial content update of JSON resources (update-resource.md)
         if (!st) return problem(reply, 404, 'Not Found')
         if (st.isDirectory()) return problem(reply, 405, 'Method Not Allowed')
         if (!await authorizeWrite(req, reply, urlPath)) return
-        const ct = (req.headers['content-type'] || '').split(';')[0]
-        const targetType = MIME[path.extname(abs)] || 'application/octet-stream'
-        if (ct !== 'application/merge-patch+json' || !['application/json', 'application/ld+json'].includes(targetType)) {
-          reply.header('accept-patch', 'application/merge-patch+json')
-          return problem(reply, 415, 'Unsupported Media Type', 'merge-patch on JSON resources only')
+        const ct = mediaTypeOf(req)
+        const targetType = formatOf(urlPath, abs)
+        if (!PATCH_TYPES.includes(ct) || !/^application\/([a-z.+-]+\+)?json$/.test(targetType)) {
+          reply.header('accept-patch', ACCEPT_PATCH)
+          return problem(reply, 415, 'Unsupported Media Type', 'JSON Patch or JSON Merge Patch, on JSON resources only')
         }
         const ifMatch = req.headers['if-match']
         if (ifMatch && ifMatch !== etagOf(st) && ifMatch !== '*') {
@@ -654,13 +744,12 @@ export async function activate (api) {
         }
         let doc
         try { doc = JSON.parse(await fs.readFile(abs, 'utf8')) } catch { return problem(reply, 409, 'Conflict', 'stored content is not valid JSON') }
-        const merge = (t, p) => {
-          if (p === null || typeof p !== 'object' || Array.isArray(p)) return p
-          const out = (t && typeof t === 'object' && !Array.isArray(t)) ? { ...t } : {}
-          for (const [k, v] of Object.entries(p)) { if (v === null) delete out[k]; else out[k] = merge(out[k], v) }
-          return out
+        let next
+        try { next = applyPatch(doc, ct, req.body) } catch (e) {
+          if (!(e instanceof PatchError)) throw e
+          return problem(reply, e.status, e.status === 400 ? 'Bad Request' : 'Conflict', e.message)
         }
-        await fs.writeFile(abs, JSON.stringify(merge(doc, req.body)))
+        await fs.writeFile(abs, JSON.stringify(next))
         emit(req, 'Update', urlPath, false)
         reply.code(204).header('etag', etagOf(await fs.stat(abs)))
         return reply.send()
@@ -699,9 +788,11 @@ export async function activate (api) {
 
   await fastify.register(async (scope) => {
     scope.removeAllContentTypeParsers()
-    scope.addContentTypeParser('application/merge-patch+json', { parseAs: 'string' }, (r, body, done) => {
-      try { done(null, JSON.parse(body)) } catch (e) { done(e) }
-    })
+    for (const t of PATCH_TYPES) {
+      scope.addContentTypeParser(t, { parseAs: 'string' }, (r, body, done) => {
+        try { done(null, JSON.parse(body)) } catch (e) { done(e) }
+      })
+    }
     scope.addContentTypeParser(LWS_JSON, { parseAs: 'string' }, (r, body, done) => {
       try { done(null, JSON.parse(body)) } catch (e) { done(e) }
     })
