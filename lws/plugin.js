@@ -537,6 +537,11 @@ export async function activate (api) {
     if (urlPath === '/-/description') return storageDescription(req, reply)
 
     // --- authorization server: token endpoint + JWKS (Authorization.html) ---
+    // Preflights reach the plugin for its service endpoints; answer them
+    // (the host's CORS layer has already set the Access-Control-* headers).
+    if (req.method === 'OPTIONS' && (urlPath === '/-/jwks' || urlPath === '/-/token')) {
+      reply.header('allow', urlPath === '/-/token' ? 'POST, OPTIONS' : 'GET, HEAD, OPTIONS').code(204); return reply.send()
+    }
     if (urlPath === '/-/jwks') {
       if (req.method !== 'GET' && req.method !== 'HEAD') { reply.header('allow', 'GET, HEAD'); return problem(reply, 405, 'Method Not Allowed') }
       reply.type('application/json').header('cache-control', 'public, max-age=300')
