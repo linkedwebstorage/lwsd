@@ -110,8 +110,25 @@ scripts/touchstone.sh --auth             # public read off; alice/bob tokens fro
 scripts/touchstone.sh --module core      # or auth, core/containers, one test id
 ```
 
-It is a scoreboard, not a gate: exit 1 means a verdict was reached and it's non-conformant,
-which is expected while the drift list in CONFORMANCE.md has open items.
+Exit 1 means a verdict was reached and it's non-conformant; exit 2 means the harness produced no
+verdict (misconfigured or unreachable).
+
+**Status, 14 Oct 2026 — Touchstone `5c49679`, 203 tests: 196 passed, 0 failed, 0 cantTell,
+7 inapplicable. Conformant** in both modes. What is left is what lwsd does not implement:
+
+| Remaining | Tests | What it would take | Planned? |
+|---|---|---|---|
+| SAML 2.0 authn suite | 3 | A SAML assertion verifier (XML-DSig) trusting a configured IdP key | No — enterprise-only; [lws-authn](https://github.com/ebremer/lws-authn) covers it via Keycloak |
+| `Content-Location` on search results | 1 | A synthetic result resource per query | No — the draft itself defines none |
+| A single-page listing that still carries `first`/`last` links | 1 | Page links even when everything fits on one page | Cosmetic |
+| First-page link on a one-page search | 1 | Same | Cosmetic |
+| Container access that does not reach members | 1 | A grant model where reading a container does not imply reading its members | No — a design choice of the ODRL engine, not a gap |
+
+Outside the harness's reach: notification envelopes still use the Activity Streams shape the
+harness accepts (the draft moved to dcterms, w3c/lws-protocol#219); `LWS_ACCEPT_CREDENTIALS`
+defaults to on, so a did:key / CID credential presented directly as a Bearer token still works
+(set it to `0` for token-exchange only); and the HTTP `QUERY` search reaches the plugin through a
+request-relabelling shim, since Fastify 4 cannot route the method (CONFORMANCE.md C15).
 
 ## License
 
