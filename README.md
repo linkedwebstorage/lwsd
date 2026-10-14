@@ -150,6 +150,11 @@ search, container access that does not reach members). The full report of that r
 JUnit — is in [`reports/touchstone/2026-10-14-5c49679/`](reports/touchstone/2026-10-14-5c49679/).
 Run it yourself with `scripts/touchstone.sh --auth`; a fresh report lands in `.touchstone/runs/`.
 
+**Independently verified.** Erich Bremer, Touchstone's author, re-runs the harness against this
+repository's head on every harness update and publishes the results beside the other LWS servers:
+**<https://ebremer.com/lws/conformance>** (first entry 14 Oct 2026: 197 of 205, 0 failed, conformant).
+That page, not this README, is the current number.
+
 Outside the harness's reach: notification envelopes still use the Activity Streams shape the
 harness accepts (the draft moved to dcterms, w3c/lws-protocol#219); `LWS_ACCEPT_CREDENTIALS`
 defaults to on, so a did:key / CID credential presented directly as a Bearer token still works
