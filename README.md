@@ -113,16 +113,33 @@ scripts/touchstone.sh --module core      # or auth, core/containers, one test id
 Exit 1 means a verdict was reached and it's non-conformant; exit 2 means the harness produced no
 verdict (misconfigured or unreachable).
 
-**Status, 14 Oct 2026 — Touchstone `5c49679`, 203 tests: 196 passed, 0 failed, 0 cantTell,
-7 inapplicable. Conformant** in both modes. What is left is what lwsd does not implement:
+**Status, 14 Oct 2026 — [Touchstone](https://github.com/ebremer/touchstone) `5c49679`, the W3C LWS
+conformance harness (5 Oct 2026 drafts): 196 passed, 0 failed, 0 cantTell, 7 inapplicable.
+Conformant.** Per specification module:
 
-| Remaining | Tests | What it would take | Planned? |
-|---|---|---|---|
-| SAML 2.0 authn suite | 3 | A SAML assertion verifier (XML-DSig) trusting a configured IdP key | No — enterprise-only; [lws-authn](https://github.com/ebremer/lws-authn) covers it via Keycloak |
-| `Content-Location` on search results | 1 | A synthetic result resource per query | No — the draft itself defines none |
-| A single-page listing that still carries `first`/`last` links | 1 | Page links even when everything fits on one page | Cosmetic |
-| First-page link on a one-page search | 1 | Same | Cosmetic |
-| Container access that does not reach members | 1 | A grant model where reading a container does not imply reading its members | No — a design choice of the ODRL engine, not a gap |
+| Specification | Touchstone manifest | Passed | MUST | SHOULD | MAY |
+|---|---|---|---|---|---|
+| **LWS 1.0 Core** — storage discovery | `core/discovery` | **7 / 7** | 6 | 1 | – |
+| — containers | `core/containers` | **18 / 18** | 11 | 5 | 2 |
+| — data resources (incl. JSON Patch, Range) | `core/data_resources` | **16 / 16** | 9 | 6 | 1 |
+| — conditional requests and entity tags | `core/conditional_requests` | **9 / 9** | 4 | 5 | – |
+| — linksets (RFC 9264 metadata) | `core/linksets` | **9 / 9** | 8 | 1 | – |
+| — pagination | `core/pagination` | **4 / 4** | 3 | 1 | – |
+| — storage server authorization | `core/storage_authorization` | **17 / 17** | 17 | – | – |
+| — authorization server (RFC 8693 token exchange) | `core/authorization_server` | **9 / 9** | 7 | 2 | – |
+| — access requests and grants (ODRL) | `core/access_grants` | **17 / 17** | 13 | 2 | 2 |
+| — notifications | `core/notifications` | **14 / 14** | 13 | 1 | – |
+| **LWS 1.0 Notification Suite: Webhooks** (RFC 9421 signatures) | `notifications/webhook` | **11 / 11** | 8 | 1 | 2 |
+| **LWS Search and Type Index Services** (HTTP QUERY) | `index` | **37 / 37** | 27 | 6 | 4 |
+| **Authentication Suite: Self-signed Identity (CID)** — did:key and HTTPS subjects | `auth/cid` | **22 / 22** | 22 | – | – |
+| **Authentication Suite: OpenID Connect** | `auth/oidc` | **6 / 6** | 6 | – | – |
+| Authentication Suite: SAML 2.0 | `auth/saml` | not implemented | – | – | – |
+| **Total** | 15 manifests | **196 / 196** | 154 | 31 | 11 |
+
+"Passed" is out of the tests that apply to this deployment; seven are inapplicable — three need SAML,
+four are preconditions for optional behaviour (`Content-Location` on search results, page links on
+a one-page listing or search, container access that does not reach members). Run it yourself with
+`scripts/touchstone.sh --auth`; the EARL report lands in `.touchstone/runs/`.
 
 Outside the harness's reach: notification envelopes still use the Activity Streams shape the
 harness accepts (the draft moved to dcterms, w3c/lws-protocol#219); `LWS_ACCEPT_CREDENTIALS`
