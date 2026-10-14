@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, delimiter } from 'path'
 import chalk from 'chalk'
@@ -60,11 +60,15 @@ console.log(chalk.cyan('LWSD') + chalk.dim(' — Linked Web Storage Daemon'))
 console.log(chalk.dim(`storage: http://${options.host}:${options.port}${options.prefix}/`))
 
 // The storage lives under the prefix; the host serves `/` from the data
-// directory's index.html (its own Solid welcome page by default). Seed a
-// page that says what is running here and where the storage is — once,
-// and never over a page the operator has edited.
+// directory's index.html, seeding its own Solid welcome page there on
+// first start if nothing exists. Seed ours first, and replace the host's
+// default if an earlier run left it behind — but never touch a page that
+// is neither, since that is one the operator wrote.
 const indexFile = join(options.root, 'index.html')
-if (!existsSync(indexFile)) {
+const isHostDefault = (html) => /Your JSS Solid pod is running|Powered by <a[^>]*>JSS<\/a>/.test(html)
+let seed = !existsSync(indexFile)
+if (!seed) { try { seed = isHostDefault(readFileSync(indexFile, 'utf8')) } catch { seed = false } }
+if (seed) {
   const storage = `http://${options.host}:${options.port}${options.prefix}/`
   const asMeta = `http://${options.host}:${options.port}/.well-known/lws-configuration${options.prefix}`
   mkdirSync(options.root, { recursive: true })
