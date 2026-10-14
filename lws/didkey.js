@@ -34,7 +34,42 @@ function powmod (base, exp, mod) {
   return r
 }
 
+// Short Weierstrass curves with p ≡ 3 (mod 4), so a compressed point
+// decompresses with one modular square root: y = (x³ + ax + b)^((p+1)/4).
+const CURVES = {
+  'P-256': {
+    p: 2n ** 256n - 2n ** 224n + 2n ** 192n + 2n ** 96n - 1n,
+    a: -3n,
+    b: 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn,
+    alg: 'ES256',
+  },
+  // The Nostr / Bitcoin curve: y² = x³ + 7.
+  secp256k1: {
+    p: 2n ** 256n - 2n ** 32n - 977n,
+    a: 0n,
+    b: 7n,
+    alg: 'ES256K',
+  },
+}
+function decompress (crv, compressed) {
+  const c = CURVES[crv]
+  if (compressed.length !== 33 || (compressed[0] !== 2 && compressed[0] !== 3)) return null
+  const x = BigInt('0x' + compressed.subarray(1).toString('hex'))
+  let y = powmod((((x ** 3n + c.a * x + c.b) % c.p) + c.p) % c.p, (c.p + 1n) / 4n, c.p)
+  if ((y & 1n) !== BigInt(compressed[0] & 1)) y = c.p - y
+  return {
+    alg: c.alg,
+    jwk: {
+      kty: 'EC',
+      crv,
+      x: b64u(Buffer.from(x.toString(16).padStart(64, '0'), 'hex')),
+      y: b64u(Buffer.from(y.toString(16).padStart(64, '0'), 'hex')),
+    },
+  }
+}
+
 // did:key URI → { alg, jwk } or null.
+// Multicodecs: 0xed01 Ed25519, 0x8024 P-256, 0xe701 secp256k1 (compressed SEC1).
 export function didKeyToJwk (did) {
   const m = /^did:key:z([1-9A-HJ-NP-Za-km-z]+)$/.exec(did)
   if (!m) return null
@@ -44,43 +79,36 @@ export function didKeyToJwk (did) {
     if (raw.length !== 32) return null
     return { alg: 'EdDSA', jwk: { kty: 'OKP', crv: 'Ed25519', x: b64u(raw) } }
   }
-  if (bytes[0] === 0x80 && bytes[1] === 0x24) {           // P-256 (compressed SEC1)
-    const compressed = bytes.subarray(2)
-    if (compressed.length !== 33) return null
-    const p = 2n ** 256n - 2n ** 224n + 2n ** 192n + 2n ** 96n - 1n
-    const b = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn
-    const x = BigInt('0x' + compressed.subarray(1).toString('hex'))
-    let y = powmod((x ** 3n - 3n * x + b) % p, (p + 1n) / 4n, p)
-    if ((y & 1n) !== BigInt(compressed[0] & 1)) y = p - y
-    return {
-      alg: 'ES256',
-      jwk: {
-        kty: 'EC',
-        crv: 'P-256',
-        x: b64u(Buffer.from(x.toString(16).padStart(64, '0'), 'hex')),
-        y: b64u(Buffer.from(y.toString(16).padStart(64, '0'), 'hex')),
-      },
-    }
-  }
+  if (bytes[0] === 0x80 && bytes[1] === 0x24) return decompress('P-256', bytes.subarray(2))
+  if (bytes[0] === 0xe7 && bytes[1] === 0x01) return decompress('secp256k1', bytes.subarray(2))
   return null
+}
+
+// A Nostr public key (32-byte x-only, BIP-340) as a did:key. BIP-340 keys
+// are the point with even y, so the compressed form is 0x02 ‖ x — which
+// makes the did:key a pure function of the npub.
+export function nostrPubkeyToDidKey (hex) {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('nostrPubkeyToDidKey: 32-byte hex x-only key expected')
+  return encodeDidKey(Buffer.concat([Buffer.from([0xe7, 0x01, 0x02]), Buffer.from(hex, 'hex')]))
+}
+
+function encodeDidKey (bytes) {
+  let n = BigInt('0x' + Buffer.from(bytes).toString('hex')); let s = ''
+  while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n }
+  for (const b of bytes) { if (b === 0) s = '1' + s; else break }
+  return 'did:key:z' + s
 }
 
 // Public JWK → did:key (the inverse of didKeyToJwk), for minting clients
 // and tests. OKP Ed25519 → 0xed01 ‖ raw; EC P-256 → 0x8024 ‖ compressed SEC1.
 export function jwkToDidKey (jwk) {
-  let bytes
   if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') {
-    bytes = Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.from(jwk.x, 'base64url')])
-  } else if (jwk.kty === 'EC' && jwk.crv === 'P-256') {
-    const y = Buffer.from(jwk.y, 'base64url')
-    bytes = Buffer.concat([Buffer.from([0x80, 0x24, 0x02 | (y[y.length - 1] & 1)]), Buffer.from(jwk.x, 'base64url')])
-  } else {
-    throw new Error('jwkToDidKey: Ed25519 or P-256 only')
+    return encodeDidKey(Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.from(jwk.x, 'base64url')]))
   }
-  let n = BigInt('0x' + bytes.toString('hex')); let s = ''
-  while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n }
-  for (const b of bytes) { if (b === 0) s = '1' + s; else break }
-  return 'did:key:z' + s
+  const codec = { 'P-256': [0x80, 0x24], secp256k1: [0xe7, 0x01] }[jwk.crv]
+  if (jwk.kty !== 'EC' || !codec) throw new Error('jwkToDidKey: Ed25519, P-256 or secp256k1 only')
+  const y = Buffer.from(jwk.y, 'base64url')
+  return encodeDidKey(Buffer.concat([Buffer.from([...codec, 0x02 | (y[y.length - 1] & 1)]), Buffer.from(jwk.x, 'base64url')]))
 }
 
 // Returns the did:key subject on success, null otherwise.

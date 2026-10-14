@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linked Web Storage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: one quiet column; the storage URI is the hero object, everything
+     else sits in a three-up grid beneath it. Light only, by design. */
+  :root {
+    --bg: #f6f7f4;
+    --surface: #ffffff;
+    --ink: #15201d;
+    --muted: #5f6d68;
+    --line: #dfe4e0;
+    --accent: #0f6f6a;
+    --accent-soft: #e3f1ef;
+    --warm: #b9562a;
+    --ok: #2f8f5b;
+    --display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    --body: "IBM Plex Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html { height: 100%; }
+  body {
+    margin: 0; min-height: 100%;
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.55 var(--body);
+    -webkit-font-smoothing: antialiased;
+    padding-block: 0 4rem;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  code, pre, .mono { font-family: var(--mono); }
+  code { font-size: .92em; }
+
+  .wrap { max-width: 68rem; margin: 0 auto; }
+
+  /* ---- top bar ---- */
+  .bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    padding-block: 1.25rem; border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: .6rem; font-weight: 600; letter-spacing: .01em; }
+  .brand .mark { width: 22px; height: 22px; }
+  .status { display: inline-flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px rgba(47,143,91,.15); }
+
+  /* ---- hero ---- */
+  .hero { padding-block: clamp(2.5rem, 7vw, 5rem) 2rem; }
+  .eyebrow { font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 1rem; }
+  h1 {
+    font-family: var(--display); font-weight: 400; font-variation-settings: "opsz" 144;
+    font-size: clamp(2.4rem, 6vw, 4.25rem); line-height: 1.02; letter-spacing: -.015em;
+    margin: 0 0 1.25rem; max-width: 18ch; text-wrap: balance;
+  }
+  h1 em { font-style: italic; color: var(--accent); }
+  .lede { font-size: 1.1rem; color: var(--muted); max-width: 58ch; margin: 0 0 2rem; }
+
+  .uri {
+    display: flex; align-items: stretch; gap: 0; max-width: 46rem;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(21,32,29,.04), 0 12px 32px -16px rgba(15,111,106,.25);
+    overflow: hidden;
+  }
+  .uri .label { padding: .9rem 1rem; font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); border-right: 1px solid var(--line); display: flex; align-items: center; white-space: nowrap; }
+  .uri a { flex: 1; min-width: 0; padding: .9rem 1rem; font-family: var(--mono); font-size: 1.05rem; color: var(--ink); overflow-wrap: anywhere; display: flex; align-items: center; }
+  .uri a:hover { text-decoration: none; color: var(--accent); }
+  .copy {
+    appearance: none; border: 0; border-left: 1px solid var(--line); background: var(--accent-soft); color: var(--accent);
+    font: 600 .8rem/1 var(--body); letter-spacing: .04em; padding: 0 1.1rem; cursor: pointer; white-space: nowrap;
+  }
+  .copy:hover { background: var(--accent); color: #fff; }
+  .copy.done { background: var(--ok); color: #fff; }
+
+  /* ---- grid ---- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; margin-top: 2.5rem; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem 1.35rem; min-width: 0; }
+  .card h2 { font: 600 .78rem/1 var(--body); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 1rem; }
+  .card p { margin: 0 0 .75rem; }
+  .card p:last-child { margin-bottom: 0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: .35rem .9rem; font-size: .92rem; align-items: baseline; }
+  .kv dt { color: var(--muted); white-space: nowrap; }
+  .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .services { list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; font-size: .92rem; }
+  .services li { display: flex; align-items: baseline; gap: .6rem; }
+  .services .dot { flex: none; position: relative; top: -1px; }
+  .services .name { font-weight: 500; }
+  .services .ep { color: var(--muted); font-family: var(--mono); font-size: .8rem; overflow-wrap: anywhere; }
+  .pending { color: var(--muted); font-style: italic; }
+
+  /* ---- try it ---- */
+  .try { margin-top: 2.5rem; }
+  .try h2 { font-family: var(--display); font-weight: 500; font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .try .sub { color: var(--muted); margin: 0 0 1rem; }
+  .steps { display: grid; gap: .9rem; }
+  .step { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .step header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem .9rem .6rem 1.1rem; border-bottom: 1px solid var(--line); font-size: .9rem; }
+  .step header .n { color: var(--warm); font-family: var(--mono); margin-right: .6rem; }
+  .step .copy { border-left: 0; border-radius: 6px; padding: .45rem .75rem; }
+  .step pre { margin: 0; padding: 1rem 1.1rem; overflow-x: auto; font-size: .88rem; line-height: 1.55; color: var(--ink); }
+  .step pre .c { color: var(--muted); }
+
+  /* ---- footer ---- */
+  footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: center; font-size: .85rem; color: var(--muted); }
+  .badge { display: inline-flex; align-items: center; gap: .5rem; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: .3rem .75rem .3rem .5rem; font-weight: 600; }
+  .badge .pct { font-family: var(--mono); font-weight: 500; }
+  footer .spacer { flex: 1; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .hero > * { animation: rise .5s ease-out both; }
+    .hero > *:nth-child(2) { animation-delay: .05s } .hero > *:nth-child(3) { animation-delay: .1s } .hero > *:nth-child(4) { animation-delay: .15s }
+    @keyframes rise { from { opacity: .001; transform: translateY(6px) } to { opacity: 1; transform: none } }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="#0f6f6a" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="#0f6f6a"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5" stroke="#0f6f6a" stroke-width="2" stroke-linecap="round"/></svg>
+      lwsd <span style="color:var(--muted);font-weight:400">0.0.5</span>
+    </div>
+    <div class="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Running · open, anonymous writes</span></div>
+  </div>
+
+  <section class="hero">
+    <p class="eyebrow">W3C Linked Web Storage</p>
+    <h1>Your storage is <em>live</em>.</h1>
+    <p class="lede">A Linked Web Storage server is running on this machine: containers and data resources over HTTP, an authorization server that issues access tokens, signed notifications, and a searchable type index. Everything below was read from the server itself.</p>
+    <div class="uri">
+      <span class="label">Storage</span>
+      <a href="http://localhost:3989/lws/" id="storage-link">http://localhost:3989/lws/</a>
+      <button class="copy" type="button" data-copy="http://localhost:3989/lws/">Copy</button>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Storage</h2>
+      <dl class="kv">
+        <dt>Description</dt><dd><a href="http://localhost:3989/lws/"><code>GET /lws/</code></a> as <code>application/lws+cid</code></dd>
+        <dt>Root container</dt><dd><a href="http://localhost:3989/lws/"><code>GET /lws/</code></a> as <code>application/lws+json</code></dd>
+        <dt>Contents</dt><dd id="contents" class="pending">reading…</dd>
+        <dt>Data</dt><dd><code>/tmp/claude-1000/-home-melvin-remote-github-com-JavaScriptSolidServer-JavaScriptSolidServer/5c4129fc-d598-4989-9558-83b7f4104138/scratchpad/lwsd/idx4</code></dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Authorization server</h2>
+      <dl class="kv">
+        <dt>Metadata</dt><dd><a href="http://localhost:3989/.well-known/lws-configuration/lws"><code>/.well-known/lws-configuration/lws</code></a></dd>
+        <dt>Token endpoint</dt><dd id="token-ep" class="pending">reading…</dd>
+        <dt>JWKS</dt><dd id="jwks" class="pending">reading…</dd>
+        <dt>Subjects</dt><dd id="subjects" class="pending">reading…</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Services</h2>
+      <ul class="services" id="services"><li class="pending">reading the storage description…</li></ul>
+    </section>
+  </div>
+
+  <section class="try">
+    <h2>Three requests to get going</h2>
+    <p class="sub">Copy each into a terminal. The first creates a container, the second puts a resource in it, the third reads the listing back.</p>
+    <div class="steps">
+      <div class="step">
+        <header><span><span class="n">1</span>Create a container</span><button class="copy" type="button" data-copy-target="c1">Copy</button></header>
+        <pre id="c1">curl -i -X POST http://localhost:3989/lws/ \
+  -H 'Slug: notes' \
+  -H 'Link: &lt;https://www.w3.org/ns/lws#Container&gt;; rel="type"'</pre>
+      </div>
+      <div class="step">
+        <header><span><span class="n">2</span>Add a data resource</span><button class="copy" type="button" data-copy-target="c2">Copy</button></header>
+        <pre id="c2">curl -i -X POST http://localhost:3989/lws/notes/ \
+  -H 'Slug: list.txt' -H 'Content-Type: text/plain' \
+  --data $'milk\neggs'</pre>
+      </div>
+      <div class="step">
+        <header><span><span class="n">3</span>Read the container</span><button class="copy" type="button" data-copy-target="c3">Copy</button></header>
+        <pre id="c3">curl http://localhost:3989/lws/notes/ -H 'Accept: application/lws+json'</pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span class="badge"><span class="dot" aria-hidden="true"></span>Touchstone <span class="pct">196 / 203</span> · conformant</span>
+    <span class="spacer"></span>
+    <a href="https://linkedwebstorage.com/">linkedwebstorage.com</a>
+    <a href="https://github.com/linkedwebstorage/lwsd">lwsd on GitHub</a>
+    <a href="https://github.com/linkedwebstorage/lwsd/blob/gh-pages/CONFORMANCE.md">Conformance</a>
+    <span>Hosted by <a href="https://github.com/JavaScriptSolidServer/JavaScriptSolidServer">JSS</a> · this page is <code>index.html</code> in the data directory</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var STORAGE = "http://localhost:3989/lws/", AS_META = "http://localhost:3989/.well-known/lws-configuration/lws";
+  var $ = function (id) { return document.getElementById(id); };
+  var mono = function (t) { var c = document.createElement('code'); c.textContent = t; return c; };
+  var link = function (href, text) { var a = document.createElement('a'); a.href = href; a.appendChild(mono(text || href)); return a; };
+  var short = function (u) { try { var x = new URL(u); return x.pathname + x.search; } catch (e) { return u; } };
+  var set = function (id, node) { var el = $(id); el.className = ''; el.textContent = ''; el.appendChild(node); };
+
+  // Storage description: the services this server advertises.
+  fetch(STORAGE, { headers: { accept: 'application/lws+cid' } }).then(function (r) { return r.json(); }).then(function (d) {
+    var ul = $('services'); ul.textContent = '';
+    (d.service || []).forEach(function (s) {
+      var li = document.createElement('li');
+      var dot = document.createElement('span'); dot.className = 'dot';
+      var name = document.createElement('span'); name.className = 'name'; name.textContent = [].concat(s.type).join(', ');
+      var ep = document.createElement('a'); ep.className = 'ep'; ep.href = s.serviceEndpoint; ep.textContent = short(s.serviceEndpoint);
+      li.appendChild(dot); li.appendChild(name); li.appendChild(document.createTextNode(' ')); li.appendChild(ep);
+      ul.appendChild(li);
+    });
+    if (!ul.children.length) { ul.innerHTML = '<li class="pending">no services advertised</li>'; }
+  }).catch(function () { $('services').innerHTML = '<li class="pending">could not read the storage description</li>'; });
+
+  // Root container: how much is in it.
+  fetch(STORAGE, { headers: { accept: 'application/lws+json' } }).then(function (r) {
+    if (r.status === 401) { var s = document.createElement('span'); s.textContent = 'private — sign in to list it'; set('contents', s); return null; }
+    return r.json();
+  }).then(function (d) {
+    if (!d) return;
+    var n = typeof d.totalItems === 'number' ? d.totalItems : (d.items || []).length;
+    var s = document.createElement('span'); s.textContent = n === 0 ? 'empty — nothing stored yet' : n + (n === 1 ? ' item' : ' items');
+    set('contents', s);
+  }).catch(function () { var s = document.createElement('span'); s.textContent = 'unavailable'; set('contents', s); });
+
+  // Authorization server metadata.
+  fetch(AS_META, { headers: { accept: 'application/json' } }).then(function (r) { return r.json(); }).then(function (m) {
+    set('token-ep', link(m.token_endpoint, short(m.token_endpoint)));
+    set('jwks', link(m.jwks_uri, short(m.jwks_uri)));
+    var s = document.createElement('span'); s.textContent = (m.subject_identifier_types_supported || []).join(', ') || '—';
+    set('subjects', s);
+  }).catch(function () { ['token-ep', 'jwks', 'subjects'].forEach(function (id) { var s = document.createElement('span'); s.textContent = 'unavailable'; set(id, s); }); });
+
+  // Copy buttons.
+  document.querySelectorAll('.copy').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var text = b.dataset.copy || (b.dataset.copyTarget && $(b.dataset.copyTarget).textContent) || '';
+      var done = function () { b.textContent = 'Copied'; b.classList.add('done'); setTimeout(function () { b.textContent = 'Copy'; b.classList.remove('done'); }, 1400); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+      else fallback();
+      function fallback () {
+        var t = b.dataset.copyTarget ? $(b.dataset.copyTarget) : $('storage-link');
+        var range = document.createRange(); range.selectNodeContents(t);
+        var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

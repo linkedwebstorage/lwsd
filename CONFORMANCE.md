@@ -19,7 +19,7 @@ results, a paginated-but-single-page listing, a first-page link on a one-page se
 access that does not reach members). As an open target (`scripts/touchstone.sh`): 64 passed, 0
 failed, 139 inapplicable — conformant.
 
-## Batteries — `npm test` runs all six (131 checks)
+## Batteries — `npm test` runs all six (134 checks)
 
 | Battery | Checks | Server config | Covers |
 |---|---|---|---|
@@ -27,7 +27,7 @@ failed, 139 inapplicable — conformant.
 | `auth.js` | 6 | `LWS_WRITERS=<did:key>` | 401 challenge + did:key self-issued JWT accept/reject |
 | `cid.js` | 3 | `LWS_WRITERS=<sub> LWS_CID_ALLOW_LOOPBACK=1` | CID self-issued JWT: dereference `sub` → controlled identifier doc → verify |
 | `grants.js` | 12 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<admin>` | ODRL access-grant engine: read-gating, foaf:Agent public grants, action scoping, dateTime constraints, authz-filtered search |
-| `as.js` | 19 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<did:key>` | authorization server: RFC 8414 metadata, JWKS, RFC 8693 token exchange (valid / invalid_target / unsupported_grant_type / expired / wrong audience / corrupted), `at+jwt` validation at the storage (corrupted, alg none, unknown kid), RFC 9728 resource metadata, owner vs non-owner |
+| `as.js` | 22 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<did:key>` | authorization server: RFC 8414 metadata, JWKS, RFC 8693 token exchange (valid / invalid_target / unsupported_grant_type / expired / wrong audience / corrupted), `at+jwt` validation at the storage (corrupted, alg none, unknown kid), RFC 9728 resource metadata, owner vs non-owner |
 | `oidc.js` | 9 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<webid> LWS_CID_ALLOW_LOOPBACK=1` | OpenID Connect ID Tokens as subject tokens: discovery via the subject's CID document, key from the OP's JWKS, expired / alg none / corrupted / untrusted issuer / missing azp / wrong aud refused |
 
 ```bash
@@ -125,6 +125,9 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   subjects (fixture-hosted documents, `LWS_CID_ALLOW_LOOPBACK=1` for the harness), did:key.
   `LWS_AS_KEY_JWK` lets an operator supply the signing key — the harness's `HarnessIssuedTokens`
   needs the same key, so `scripts/touchstone.sh --auth` generates one per run and declares it.
+- [x] **secp256k1 / ES256K did:keys** (RFC 8812): a Nostr or Bitcoin key is an LWS identity as-is —
+  `did:key` with the `0xe701` codec, credentials signed ECDSA on the same curve. `mint-token.js --nostr`
+  takes hex or nsec. The did:key of a BIP-340 x-only pubkey is deterministic (even y).
 - [ ] Notification envelopes: Activity Streams terms → dcterms + LWS (#219); core notification
   model folded into lws10-core (#185). (The harness accepts the AS2-shaped envelope today.)
 - [ ] Slug dropped from spec text (#224) — keep accepting it, stop relying on it in tests.

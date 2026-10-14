@@ -21,7 +21,7 @@
 //   --ttl N      credential lifetime in seconds (default 300)
 //
 
-import { createPrivateKey, generateKeyPairSync, sign as cryptoSign } from 'crypto'
+import { createECDH, createPrivateKey, generateKeyPairSync, sign as cryptoSign } from 'crypto'
 import { promises as fs } from 'fs'
 import { jwkToDidKey } from '../lws/didkey.js'
 
@@ -33,21 +33,46 @@ const keyFile = opt('--key')
 const ttl = parseInt(opt('--ttl', '300'), 10)
 const envName = opt('--env')
 
+// --nostr <hex|nsec1…>: sign in with a Nostr key. The same secp256k1
+// private key signs ECDSA (ES256K) here instead of Schnorr, and the
+// did:key is derived from the x-only public key (BIP-340: even y).
+const nostr = opt('--nostr')
 let jwk
-if (keyFile) { try { jwk = JSON.parse(await fs.readFile(keyFile, 'utf8')) } catch { /* new */ } }
+if (nostr) {
+  jwk = nostrKeyToJwk(nostr)
+} else if (keyFile) { try { jwk = JSON.parse(await fs.readFile(keyFile, 'utf8')) } catch { /* new */ } }
 if (!jwk) {
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
   jwk = privateKey.export({ format: 'jwk' })
   if (keyFile) await fs.writeFile(keyFile, JSON.stringify(jwk), { mode: 0o600 })
 }
+const alg = jwk.crv === 'secp256k1' ? 'ES256K' : 'ES256'
 const did = jwkToDidKey(jwk)
 if (flag('--emit-did')) { process.stdout.write(did); process.exit(0) }
-if (!storage) { console.error('usage: mint-token.js <storage-url> [--key FILE] [--emit-did] [--env NAME] [--ttl N]'); process.exit(2) }
+if (!storage) { console.error('usage: mint-token.js <storage-url> [--key FILE | --nostr HEX|NSEC] [--emit-did] [--env NAME] [--ttl N]'); process.exit(2) }
+
+function nostrKeyToJwk (secret) {
+  let hex = secret.trim()
+  if (/^nsec1/.test(hex)) hex = Buffer.from(bech32Decode(hex)).toString('hex')
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('--nostr wants a 64-hex-char private key or an nsec')
+  const ecdh = createECDH('secp256k1'); ecdh.setPrivateKey(Buffer.from(hex, 'hex'))
+  const pub = ecdh.getPublicKey() // 0x04 ‖ x ‖ y
+  const b64 = (b) => Buffer.from(b).toString('base64url')
+  return { kty: 'EC', crv: 'secp256k1', x: b64(pub.subarray(1, 33)), y: b64(pub.subarray(33, 65)), d: b64(Buffer.from(hex, 'hex')) }
+}
+// bech32 (BIP-173) data part → bytes, enough for nsec.
+function bech32Decode (s) {
+  const CH = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+  const data = s.toLowerCase().slice(s.lastIndexOf('1') + 1, -6).split('').map((c) => CH.indexOf(c))
+  const out = []; let acc = 0; let bits = 0
+  for (const v of data) { acc = (acc << 5) | v; bits += 5; if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff) } }
+  return Uint8Array.from(out)
+}
 
 const b64u = (b) => Buffer.from(b).toString('base64url')
 function selfIssued (aud) {
   const now = Math.floor(Date.now() / 1000)
-  const h = b64u(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid: did.slice('did:key:'.length) }))
+  const h = b64u(JSON.stringify({ alg, typ: 'JWT', kid: did.slice('did:key:'.length) }))
   const p = b64u(JSON.stringify({ sub: did, iss: did, client_id: did, aud, iat: now, exp: now + ttl, jti: now.toString(36) }))
   const sig = cryptoSign('SHA256', Buffer.from(h + '.' + p), { key: createPrivateKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' })
   return `${h}.${p}.${b64u(sig)}`

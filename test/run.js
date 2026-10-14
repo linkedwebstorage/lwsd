@@ -60,7 +60,7 @@ console.log('\n=== authz: ODRL access grants (12/12) ===')
 const admin = execFileSync('node', [join(here, 'grants.js'), '--emit-admin']).toString()
 const r4 = await battery('grants', { port: 5604, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: admin }, script: 'grants.js' })
 
-console.log('\n=== authorization server: token exchange + at+jwt validation (19/19) ===')
+console.log('\n=== authorization server: token exchange + at+jwt validation (22/22) ===')
 const asAlice = execFileSync('node', [join(here, 'as.js'), '--emit-did']).toString()
 const r5 = await battery('as', { port: 5605, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: asAlice }, script: 'as.js' })
 

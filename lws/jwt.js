@@ -29,6 +29,8 @@ export function verifyJwtWithJwk (decoded, jwk) {
     const data = Buffer.from(decoded.signingInput)
     if (alg === 'EdDSA') return cryptoVerify(null, data, key, decoded.signature)
     if (alg === 'ES256') return cryptoVerify('SHA256', data, { key, dsaEncoding: 'ieee-p1363' }, decoded.signature)
+    // RFC 8812: ECDSA on secp256k1 — the curve Nostr and Bitcoin keys live on.
+    if (alg === 'ES256K') return jwk.crv === 'secp256k1' && cryptoVerify('SHA256', data, { key, dsaEncoding: 'ieee-p1363' }, decoded.signature)
     if (alg === 'ES384') return cryptoVerify('SHA384', data, { key, dsaEncoding: 'ieee-p1363' }, decoded.signature)
     if (alg === 'RS256') return cryptoVerify('SHA256', data, key, decoded.signature)
     return false

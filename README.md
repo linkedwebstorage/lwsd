@@ -11,7 +11,7 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**196 of 203 [Touchstone](https://github.com/ebremer/touchstone) tests pass (0 failed; see [Touchstone](#touchstone)). Own suite: 131 checks across 6 batteries** (`npm test`) over the current editors' drafts —
+**196 of 203 [Touchstone](https://github.com/ebremer/touchstone) tests pass (0 failed; see [Touchstone](#touchstone)). Own suite: 134 checks across 6 batteries** (`npm test`) over the current editors' drafts —
 core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
 See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
 of spec conflicts and host-API gaps the implementation surfaced (C1–C14).
@@ -85,7 +85,14 @@ exchange):
 ```bash
 node scripts/mint-token.js http://localhost:3126/lws/ --key me.jwk          # prints an at+jwt
 node scripts/mint-token.js --key me.jwk --emit-did                           # the did:key to put in LWS_WRITERS
+node scripts/mint-token.js http://localhost:3126/lws/ --nostr nsec1…         # sign in with a Nostr key
 ```
+
+**Nostr keys are LWS identities.** A Nostr secret key is a secp256k1 key; lwsd derives its
+did:key (`did:key:zQ3s…`, the `0xe701` codec, BIP-340's even-y point) and signs the credential
+with ECDSA (`ES256K`) instead of Schnorr — same key, same person, no registration. `--nostr`
+takes hex or an `nsec`. The server verifies `ES256K` credentials for secp256k1 did:keys alongside
+Ed25519 and P-256.
 
 ## Test suite
 

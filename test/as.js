@@ -123,6 +123,26 @@ check('AS18', 'bob reads alice\'s container: 403', r.status === 403, `status ${r
 r = await fetch(notes, { method: 'POST', headers: { authorization: 'Bearer ' + bobToken, slug: 'nope' }, body: 'x' })
 check('AS19', 'bob writes into it: 403', r.status === 403, `status ${r.status}`)
 
+// 5. a Nostr key: secp256k1, signed ES256K, did:key with the 0xe701 codec
+{
+  const { createECDH, createPrivateKey, randomBytes, sign: ecSign } = await import('crypto')
+  const { jwkToDidKey, nostrPubkeyToDidKey } = await import('../lws/didkey.js')
+  // BIP-340 keys are the even-y point; pick a secret whose point has even y so
+  // the x-only pubkey → did:key derivation is exercised too.
+  let secret, pub
+  do { secret = randomBytes(32); const e = createECDH('secp256k1'); e.setPrivateKey(secret); pub = e.getPublicKey() } while (pub[64] & 1)
+  const jwk = { kty: 'EC', crv: 'secp256k1', x: b64u(pub.subarray(1, 33)), y: b64u(pub.subarray(33, 65)), d: b64u(secret) }
+  const ndid = jwkToDidKey(jwk)
+  check('AS20', 'A Nostr x-only pubkey maps to the same did:key as the full key (0xe701, even y)', ndid === nostrPubkeyToDidKey(pub.subarray(1, 33).toString('hex')) && ndid.startsWith('did:key:zQ3s'), ndid)
+  const h = b64u(JSON.stringify({ alg: 'ES256K', typ: 'JWT', kid: ndid.slice(8) }))
+  const p = b64u(JSON.stringify({ sub: ndid, iss: ndid, client_id: ndid, aud: meta.issuer, iat: now(), exp: now() + 300 }))
+  const sig = ecSign('SHA256', Buffer.from(h + '.' + p), { key: createPrivateKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' })
+  r = await exchange({ subject_token: `${h}.${p}.${b64u(sig)}` }); body = await r.json().catch(() => ({}))
+  check('AS21', 'ES256K credential from a Nostr key: exchanged for an access token with sub = its did:key', r.status === 200 && !!body.access_token && decode(body.access_token).claims.sub === ndid, `status ${r.status} ${body.error || ''}`)
+  r = await exchange({ subject_token: `${h}.${p}.${b64u(sig).slice(0, -4)}AAAA` }); body = await r.json().catch(() => ({}))
+  check('AS22', 'Corrupted ES256K signature: 400', r.status === 400 && body.error === 'invalid_request', `status ${r.status}`)
+}
+
 const failed = results.filter((x) => !x.ok).length
 console.log(`\n${results.length - failed}/${results.length} authorization server checks pass`)
 process.exit(failed ? 1 : 0)
