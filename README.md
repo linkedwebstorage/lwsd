@@ -11,7 +11,7 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**Conformance: 107 checks across 5 batteries** (`npm test`) over the current editors' drafts —
+**Conformance: 131 checks across 6 batteries** (`npm test`) over the current editors' drafts —
 core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
 See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
 of spec conflicts and host-API gaps the implementation surfaced (C1–C14).

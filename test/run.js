@@ -64,6 +64,12 @@ console.log('\n=== authorization server: token exchange + at+jwt validation (19/
 const asAlice = execFileSync('node', [join(here, 'as.js'), '--emit-did']).toString()
 const r5 = await battery('as', { port: 5605, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: asAlice }, script: 'as.js' })
 
-const all = [r1, r2, r3, r4, r5]
+console.log('\n=== authn: OpenID Connect ID Token as subject token (9/9) ===')
+const oidcPort = 5697
+try { rmSync(join(tmpdir(), 'lws-oidc-test-key.json'), { force: true }) } catch { /* none */ }
+const oidcSub = execFileSync('node', [join(here, 'oidc.js'), '--emit-sub', String(oidcPort)]).toString()
+const r6 = await battery('oidc', { port: 5606, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: oidcSub, LWS_CID_ALLOW_LOOPBACK: '1' }, script: 'oidc.js', args: [String(oidcPort)] })
+
+const all = [r1, r2, r3, r4, r5, r6]
 console.log(`\n${'='.repeat(50)}\n${all.filter(Boolean).length}/${all.length} batteries passed`)
 process.exit(all.every(Boolean) ? 0 : 1)

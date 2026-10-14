@@ -97,7 +97,7 @@ if (gid) { await fetch(BASE.replace(/\/lws$/, '') + gid, { method: 'DELETE', hea
 check('G10', 'Grant list is a container', grants.type === 'Container' && Array.isArray(grants.items))
 
 // search authorization filtering: bob sees only what he can read
-r = await fetch(BASE + '/-/types/search?type=' + encodeURIComponent('https://www.w3.org/ns/lws#DataResource'), { headers: B })
+r = await fetch(BASE + '/-/types/search', { method: 'QUERY', headers: { ...B, 'content-type': 'application/lws-query+json' }, body: JSON.stringify({ type: ['https://www.w3.org/ns/lws#DataResource'] }) })
 const sb = await r.json()
 const sbIds = sb.items.map((i) => i.id)
 check('G11', 'Search filtered to authorized (bob sees doc + open, not the ungranted ones)',

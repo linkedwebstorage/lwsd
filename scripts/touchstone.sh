@@ -124,7 +124,12 @@ fi
 mkdir -p "$DATA"
 if [ "$AUTH" = 1 ]; then
   ALICE_DID=$(node "$ROOT/scripts/mint-token.js" --key "$WORK/alice.jwk" --emit-did)
-  LWS_PUBLIC_READ=0 LWS_WRITERS="$ALICE_DID" LWS_AS_TOKEN_LIFETIME=3600 \
+  # The harness hosts the CID documents and the OpenID Provider the auth
+  # suites dereference (ReachableFixtures) on a loopback port of our
+  # choosing; the CID / OIDC verifiers must be allowed to fetch loopback.
+  FIXTURES_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
+  FIXTURES_URL="http://127.0.0.1:$FIXTURES_PORT/"
+  LWS_PUBLIC_READ=0 LWS_WRITERS="$ALICE_DID" LWS_AS_TOKEN_LIFETIME=3600 LWS_CID_ALLOW_LOOPBACK=1 \
     "$JSS_BIN" start --port "$PORT" --host 127.0.0.1 --root "$DATA" \
     --public --no-git --no-idp --plugin "$ROOT/lws/plugin.js@/lws" > "$WORK/jss.log" 2>&1 &
 else
@@ -151,8 +156,8 @@ if [ "$AUTH" = 1 ]; then
   eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/alice.jwk" --env alice --ttl 3600)"
   eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/bob.jwk" --env bob --ttl 3600)"
   export TOUCHSTONE_TOKEN_ALICE TOUCHSTONE_WEBID_ALICE TOUCHSTONE_TOKEN_BOB TOUCHSTONE_WEBID_BOB
-  CAPABILITIES="${CAPABILITIES:+$CAPABILITIES,}Authentication"
-  echo "auth: alice=$TOUCHSTONE_WEBID_ALICE bob=$TOUCHSTONE_WEBID_BOB (capabilities: $CAPABILITIES)"
+  CAPABILITIES="${CAPABILITIES:+$CAPABILITIES,}Authentication,ReachableFixtures"
+  echo "auth: alice=$TOUCHSTONE_WEBID_ALICE bob=$TOUCHSTONE_WEBID_BOB (capabilities: $CAPABILITIES; fixtures at $FIXTURES_URL)"
 fi
 
 # --- run --------------------------------------------------------------------
@@ -162,6 +167,11 @@ caps=""
 for c in ${CAPABILITIES//,/ }; do caps="${caps:+$caps, }$c"; done
 printf 'targets:\n  sut:\n    baseUrl: "%s"\n    adapter: env\n    capabilities: [%s]\n' \
   "$BASE_URL" "$caps" > "$WORK/targets.yaml"
+if [ -n "${FIXTURES_URL:-}" ]; then
+  printf '    properties:\n      fixtures.baseUrl: "%s"\n' "$FIXTURES_URL" >> "$WORK/targets.yaml"
+else
+  printf '    properties: {}\n' >> "$WORK/targets.yaml"
+fi
 
 set +e
 if [ "$RUNNER" = docker ]; then

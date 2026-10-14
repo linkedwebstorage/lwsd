@@ -21,7 +21,13 @@ import { decodeJwt, verifyJwtWithJwk } from './jwt.js'
 
 export const GRANT_TOKEN_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange'
 export const TOKEN_TYPE_JWT = 'urn:ietf:params:oauth:token-type:jwt'
+export const TOKEN_TYPE_ID_TOKEN = 'urn:ietf:params:oauth:token-type:id_token'
 export const TOKEN_TYPE_ACCESS_TOKEN = 'urn:ietf:params:oauth:token-type:access_token'
+// jwt: a self-issued CID / did:key credential; id_token: an OpenID Connect
+// ID Token (lws10-authn-openid). RFC 8693 spells the latter with an
+// underscore; the draft's example once had a hyphen, so both are taken.
+export const SUBJECT_TOKEN_TYPES = [TOKEN_TYPE_JWT, TOKEN_TYPE_ID_TOKEN]
+export const normalizeTokenType = (t) => t === 'urn:ietf:params:oauth:token-type:id-token' ? TOKEN_TYPE_ID_TOKEN : t
 
 // RFC 6749 §5.2 error response; `error` is the registered code.
 export class OAuthError extends Error {
@@ -66,7 +72,7 @@ export class AuthorizationServer {
       token_endpoint_auth_methods_supported: ['none'],
       response_types_supported: ['token'],
       claims_supported: ['sub', 'iss', 'client_id', 'aud', 'exp', 'iat', 'jti'],
-      subject_token_types_supported: [TOKEN_TYPE_JWT],
+      subject_token_types_supported: SUBJECT_TOKEN_TYPES,
       subject_identifier_types_supported: this.subjectIdentifierTypes,
     }
   }
@@ -128,11 +134,11 @@ export class AuthorizationServer {
     if (grant !== GRANT_TOKEN_EXCHANGE) throw new OAuthError('unsupported_grant_type', `only ${GRANT_TOKEN_EXCHANGE}`)
     const resource = one('resource')
     const token = one('subject_token')
-    const tokenType = one('subject_token_type')
+    const tokenType = normalizeTokenType(one('subject_token_type'))
     let uri
     try { uri = new URL(resource) } catch { throw new OAuthError('invalid_target', 'resource must be a URI') }
     if (!uri || !isKnownStorage(resource)) throw new OAuthError('invalid_target', 'resource is not a storage this server issues tokens for')
-    if (tokenType !== TOKEN_TYPE_JWT) throw new OAuthError('invalid_request', `unsupported subject_token_type; use ${TOKEN_TYPE_JWT}`)
+    if (!SUBJECT_TOKEN_TYPES.includes(tokenType)) throw new OAuthError('invalid_request', `unsupported subject_token_type; one of ${SUBJECT_TOKEN_TYPES.join(', ')}`)
     const subject = await verifySubject(token, tokenType, issuer)
     if (!subject) throw new OAuthError('invalid_request', 'the subject token could not be validated')
     const accessToken = this.issue({ subject: subject.subject, client: subject.client, audience: resource, issuer })

@@ -7,7 +7,7 @@ lws10-authn-ssi-did-key, and lws10-authn-ssi-cid.
 Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js`, `didkey.js`,
 `jwt.js`) as a JSS plugin (jss ≥ 0.0.219).
 
-## Batteries — `npm test` runs all five (107 checks)
+## Batteries — `npm test` runs all six (131 checks)
 
 | Battery | Checks | Server config | Covers |
 |---|---|---|---|
@@ -16,6 +16,7 @@ Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js
 | `cid.js` | 3 | `LWS_WRITERS=<sub> LWS_CID_ALLOW_LOOPBACK=1` | CID self-issued JWT: dereference `sub` → controlled identifier doc → verify |
 | `grants.js` | 12 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<admin>` | ODRL access-grant engine: read-gating, foaf:Agent public grants, action scoping, dateTime constraints, authz-filtered search |
 | `as.js` | 19 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<did:key>` | authorization server: RFC 8414 metadata, JWKS, RFC 8693 token exchange (valid / invalid_target / unsupported_grant_type / expired / wrong audience / corrupted), `at+jwt` validation at the storage (corrupted, alg none, unknown kid), RFC 9728 resource metadata, owner vs non-owner |
+| `oidc.js` | 9 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<webid> LWS_CID_ALLOW_LOOPBACK=1` | OpenID Connect ID Tokens as subject tokens: discovery via the subject's CID document, key from the OP's JWKS, expired / alg none / corrupted / untrusted issuer / missing azp / wrong aud refused |
 
 ```bash
 JSS_BIN=$(command -v jss) npm test        # orchestrates all four on scratch ports
@@ -82,7 +83,15 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   `If-Modified-Since` / `If-Unmodified-Since`; `Allow` on 405s.
 - [ ] **did:key authn suite discontinued** (#229, 18 Sep); CID suite clarifies DID subjects (#233).
   `didkey.js` becomes legacy; a `did:key` subject should go through the CID path.
-- [ ] **Search: GET/POST → HTTP QUERY** (#179); searchindex renamed lws10-index (#249).
+- [x] **Search: GET/POST → HTTP QUERY** (#179); searchindex renamed lws10-index (#249). The filter
+  travels as `application/lws-query+json` in a QUERY body; `OPTIONS` advertises `Accept-Query`;
+  400 / 415 / 406 per §Errors; `Cache-Control: private` on both services. Types are also derived
+  from content (`<> a …` in Turtle, `@type` / `type` in JSON), shallowly. A GET with the filter in
+  the query string stays as a non-standard convenience; POST is gone. See C15 for how QUERY
+  reaches the plugin on Fastify 4.
+- [x] Access requests may be posted by any authenticated agent (not only writers); incomplete
+  grants/requests (missing `type`, `storage`, `access`, policy `action`/`assignee`) are refused
+  with 400; the `format` constraint is honoured (as is the older `mediaType` spelling).
 - [x] **Authorization server** (Authorization.html): `lws/as.js` — RFC 8693 token exchange at
   `/-/token`, RFC 8414 metadata at `/.well-known/lws-configuration<prefix>` (a root path, claimed
   via jss `api.reservePath`), JWKS at `/-/jwks`, ES256 `at+jwt` access tokens (RFC 9068; `kid` =
@@ -143,6 +152,13 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   subscriber lacks read access to all topics") is now enforceable via the ODRL engine when
   `publicRead=0`; still shape-checked only under the public-read default (where read access always
   holds). The requirement is sound; testing it fully needs a non-public server.
+- **C15 (H)** — a plugin cannot add an HTTP method. lws10-index moved search to HTTP `QUERY`
+  (RFC 10008); Node's parser accepts it, but Fastify 4 (what jss ships) has a fixed method list and
+  404s before routing, and a plugin has no hook earlier than that. Fastify 5 has
+  `addHttpMethod('QUERY', { hasBody: true })`. Until jss moves, the plugin prepends a listener on
+  the raw server that relabels a `QUERY` request as `POST` and remembers it in a `WeakSet`; the
+  handler reports the real method. Narrow and reversible, but it is the plugin reaching under the
+  host. Worth a jss issue: Fastify 5, or a host-level `QUERY` registration.
 - **C14 (S)** — the CID authn suite requires the verifier to **dereference** the subject URI over
   the network to fetch the controlled identifier document. That's a mandatory outbound fetch from
   a *storage server* — an SSRF surface the spec doesn't discuss. This plugin guards it (http/https
