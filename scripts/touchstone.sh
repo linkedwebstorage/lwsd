@@ -37,6 +37,7 @@ REF=5c49679385de2ec087787a46e533cb741c018274
 REPORTS="$ROOT/.touchstone/runs"
 CAPABILITIES=""
 BUILD=1
+AUTH=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,6 +47,7 @@ while [ $# -gt 0 ]; do
     --reports)      REPORTS=$2; shift 2 ;;
     --capabilities) CAPABILITIES=$2; shift 2 ;;
     --no-build)     BUILD=0; shift ;;
+    --auth)         AUTH=1; shift ;;
     -h|--help)      sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -110,21 +112,48 @@ if [ "$BUILD" = 1 ]; then
   fi
 fi
 
-# --- start lwsd (jss + lws plugin) as an open target ---------------------------
+# --- start lwsd (jss + lws plugin) ----------------------------------------------
+#
+# Open target (default): anonymous writes, nothing declared. With --auth:
+# public read off, alice (a did:key minted here) the only writer, and the
+# harness given alice's and bob's access tokens from our own authorization
+# server, so the Authentication capability can be declared. Tokens are
+# minted for an hour so a run never outlives them; the draft's 300 s
+# default stays for everyone else.
 
 mkdir -p "$DATA"
-LWS_ANON_WRITES=1 "$JSS_BIN" start --port "$PORT" --host 127.0.0.1 --root "$DATA" \
-  --public --no-git --no-idp --plugin "$ROOT/lws/plugin.js@/lws" > "$WORK/jss.log" 2>&1 &
+if [ "$AUTH" = 1 ]; then
+  ALICE_DID=$(node "$ROOT/scripts/mint-token.js" --key "$WORK/alice.jwk" --emit-did)
+  LWS_PUBLIC_READ=0 LWS_WRITERS="$ALICE_DID" LWS_AS_TOKEN_LIFETIME=3600 \
+    "$JSS_BIN" start --port "$PORT" --host 127.0.0.1 --root "$DATA" \
+    --public --no-git --no-idp --plugin "$ROOT/lws/plugin.js@/lws" > "$WORK/jss.log" 2>&1 &
+else
+  LWS_ANON_WRITES=1 "$JSS_BIN" start --port "$PORT" --host 127.0.0.1 --root "$DATA" \
+    --public --no-git --no-idp --plugin "$ROOT/lws/plugin.js@/lws" > "$WORK/jss.log" 2>&1 &
+fi
 JSS_PID=$!
+# Up means "answers HTTP at all": with --auth the root is a 401, not a 200.
+up() { [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL")" != 000 ]; }
 for _ in $(seq 1 60); do
-  curl -sf -o /dev/null "$BASE_URL" && break
+  up && break
   if ! kill -0 "$JSS_PID" 2>/dev/null; then
     echo "jss exited during startup:" >&2; cat "$WORK/jss.log" >&2; exit 2
   fi
   sleep 0.5
 done
-curl -sf -o /dev/null "$BASE_URL" || { echo "lwsd did not come up on $BASE_URL" >&2; cat "$WORK/jss.log" >&2; exit 2; }
+up || { echo "lwsd did not come up on $BASE_URL" >&2; cat "$WORK/jss.log" >&2; exit 2; }
 echo "lwsd: jss $("$JSS_BIN" --version) + lws plugin at $BASE_URL"
+
+if [ "$AUTH" = 1 ]; then
+  # alice's key is the one the server was told about; bob's is fresh. Both
+  # go through the real token exchange, so the tokens are what any client
+  # would hold. The harness reads them by name from its environment.
+  eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/alice.jwk" --env alice --ttl 3600)"
+  eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/bob.jwk" --env bob --ttl 3600)"
+  export TOUCHSTONE_TOKEN_ALICE TOUCHSTONE_WEBID_ALICE TOUCHSTONE_TOKEN_BOB TOUCHSTONE_WEBID_BOB
+  CAPABILITIES="${CAPABILITIES:+$CAPABILITIES,}Authentication"
+  echo "auth: alice=$TOUCHSTONE_WEBID_ALICE bob=$TOUCHSTONE_WEBID_BOB (capabilities: $CAPABILITIES)"
+fi
 
 # --- run --------------------------------------------------------------------
 

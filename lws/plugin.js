@@ -23,6 +23,8 @@ import { verifySelfIssuedJwt } from './didkey.js'
 import { verifyCidJwt } from './cidauth.js'
 import { evaluate as evalGrants, HTTP_TO_ACTION } from './access.js'
 import { apply as applyJsonPatch, PatchError } from './jsonpatch.js'
+import { AuthorizationServer, OAuthError, TOKEN_TYPE_JWT } from './as.js'
+import { decodeJwt } from './jwt.js'
 
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
@@ -91,6 +93,21 @@ export async function activate (api) {
   const notifier = new Notifier(priv, log)
   await notifier.init()
 
+  // Embedded authorization server (Authorization.html). Its issuer is the
+  // plugin's own URI (origin + prefix), so RFC 8414 puts its metadata at
+  // /.well-known/lws-configuration<prefix> — a root path, claimed through
+  // api.reservePath below. Tokens are short-lived by default (draft: ≤ 300 s);
+  // LWS_AS_TOKEN_LIFETIME raises that for long test sessions.
+  const as = await new AuthorizationServer({
+    dir: priv,
+    lifetime: config.tokenLifetime || parseInt(process.env.LWS_AS_TOKEN_LIFETIME, 10) || 300,
+    log,
+  }).init()
+  // Pre-baseline behaviour (CONFORMANCE.md C12): also accept a did:key / CID
+  // credential presented directly as the Bearer token. On by default for
+  // existing clients; LWS_ACCEPT_CREDENTIALS=0 makes the storage strict.
+  const acceptCredentials = config.acceptCredentials !== false && process.env.LWS_ACCEPT_CREDENTIALS !== '0'
+
   // type index: urlPath -> { types: [], rels: { relName: [targets] } }
   const typeIndexFile = path.join(priv, 'typeindex.json')
   let typeIndex = {}
@@ -114,6 +131,9 @@ export async function activate (api) {
   // StorageRoot service points at the root container — here, the same URI).
   const storageId = (req) => href(req, '/')
   const storageLink = (req) => `<${storageId(req)}>; rel="${LWS}storage"`
+  // The authorization server's issuer identifier: the plugin's own URI.
+  const issuerOf = (req) => baseUrl(req) + prefix
+  const requestPath = (req) => { try { return new URL(req.url, 'http://x').pathname } catch { return prefix + '/' } }
   // Discovery.html: a request for the storage URI returns the description as
   // application/lws+cid "unless content negotiation requires a different
   // format" — so no Accept, */*, or an explicit lws+cid gets the description;
@@ -315,22 +335,49 @@ export async function activate (api) {
   const writers = Array.isArray(config.writers) && config.writers.length ? config.writers
     : (process.env.LWS_WRITERS || '').split(',').map((s) => s.trim()).filter(Boolean)
 
+  // Authorization.html: a 401 carries a Bearer challenge the client discovers
+  // the authorization server from. resource_metadata (RFC 9728, the 14 Oct
+  // draft) names the protected resource metadata document for *this* URI;
+  // as_uri / realm are the earlier draft's parameters, kept for clients and
+  // harnesses that still read them.
   function challenge (reply, req) {
+    const rm = `${baseUrl(req)}/.well-known/oauth-protected-resource${requestPath(req)}`
     reply.header('www-authenticate',
-      `Bearer as_uri="${baseUrl(req)}", realm="${storageId(req)}", error="invalid_token"`)
+      `Bearer resource_metadata="${rm}", as_uri="${issuerOf(req)}", realm="${storageId(req)}", error="invalid_token"`)
     // Discovery.html: the storage link is on every GET/HEAD response for a
     // storage resource, a 401 included — a client with no credentials still
     // has to find the storage (and from it the authorization server).
     if (!reply.getHeader('link')) reply.header('link', storageLink(req))
   }
 
+  // Subject-token validation for the token endpoint: a self-issued did:key
+  // or CID JWT whose audience is this authorization server. Returns
+  // { subject, client } or null. (A self-issued credential's client is its
+  // subject: sub = iss = client_id.)
+  async function verifySubject (token, tokenType, audience) {
+    if (tokenType !== TOKEN_TYPE_JWT) return null
+    const d = decodeJwt(token)
+    if (!d || ![].concat(d.claims.aud ?? []).includes(audience)) return null
+    const subject = verifySelfIssuedJwt(token) || await verifyCidJwt(token, { allowLoopback: allowLoopbackCid })
+    return subject ? { subject, client: subject } : null
+  }
+
   async function agentOf (req) {
     const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1]
     if (bearer && bearer.split('.').length === 3) {
-      const did = verifySelfIssuedJwt(bearer)
-      if (did) return did
-      const cid = await verifyCidJwt(bearer, { allowLoopback: allowLoopbackCid })
-      if (cid) return cid
+      // An access token from our authorization server (typ at+jwt) is
+      // validated as Authorization.html says and never falls through: a bad
+      // one is a bad one, not an attempt at a direct credential.
+      const d = decodeJwt(bearer)
+      if (d && /^(application\/)?at\+jwt$/i.test(d.header?.typ || '')) {
+        return as.verify(bearer, { issuer: issuerOf(req), audience: storageId(req) })?.sub ?? null
+      }
+      if (acceptCredentials) {
+        const did = verifySelfIssuedJwt(bearer)
+        if (did) return did
+        const cid = await verifyCidJwt(bearer, { allowLoopback: allowLoopbackCid })
+        if (cid) return cid
+      }
     }
     return api.auth.getAgent(req)
   }
@@ -421,6 +468,34 @@ export async function activate (api) {
 
   async function serviceRoutes (req, reply, urlPath) {
     if (urlPath === '/-/description') return storageDescription(req, reply)
+
+    // --- authorization server: token endpoint + JWKS (Authorization.html) ---
+    if (urlPath === '/-/jwks') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') { reply.header('allow', 'GET, HEAD'); return problem(reply, 405, 'Method Not Allowed') }
+      reply.type('application/json').header('cache-control', 'public, max-age=300')
+      return req.method === 'HEAD' ? reply.send() : as.jwks()
+    }
+    if (urlPath === '/-/token') {
+      if (req.method !== 'POST') { reply.header('allow', 'POST'); return problem(reply, 405, 'Method Not Allowed') }
+      reply.type('application/json').header('cache-control', 'no-store').header('pragma', 'no-cache')
+      try {
+        if (mediaTypeOf(req) !== 'application/x-www-form-urlencoded') {
+          throw new OAuthError('invalid_request', 'token requests are application/x-www-form-urlencoded')
+        }
+        const params = new URLSearchParams(Buffer.isBuffer(req.body) ? req.body.toString() : String(req.body ?? ''))
+        return await as.exchange(params, {
+          issuer: issuerOf(req),
+          // One storage per plugin instance: the root container's URI, with
+          // or without its trailing slash.
+          isKnownStorage: (r) => r === storageId(req) || r === storageId(req).replace(/\/$/, ''),
+          verifySubject,
+        })
+      } catch (e) {
+        if (!(e instanceof OAuthError)) throw e
+        reply.code(400)
+        return { error: e.error, error_description: e.message }
+      }
+    }
 
     // linkset resources (Operations/metadata.md, RFC 9264)
     if (urlPath.startsWith('/-/meta/') || urlPath === '/-/meta') {
@@ -797,6 +872,32 @@ export async function activate (api) {
       try { done(null, JSON.parse(body)) } catch (e) { done(e) }
     })
     scope.addContentTypeParser('*', { parseAs: 'buffer' }, (r, body, done) => done(null, body))
+
+    // Root-level discovery documents the authorization framework pins to
+    // well-known paths (RFC 8414 metadata, RFC 9728 protected resource
+    // metadata). Outside the mount, so claimed through api.reservePath (jss
+    // #602) — read-only, WAC-exempt — when the host offers it; without it
+    // the routes still register but core's dotfile/WAC handling decides.
+    const wellKnownAs = '/.well-known/lws-configuration' + prefix
+    const wellKnownPrm = '/.well-known/oauth-protected-resource' + prefix
+    if (typeof api.reservePath === 'function') {
+      api.reservePath(wellKnownAs)
+      api.reservePath(wellKnownPrm)
+    }
+    const asMetadata = (req, reply) => {
+      reply.type('application/json').header('cache-control', 'public, max-age=300')
+      return as.metadata(issuerOf(req), { tokenEndpoint: href(req, '/-/token'), jwksUri: href(req, '/-/jwks') })
+    }
+    scope.get(wellKnownAs, asMetadata)
+    scope.get(wellKnownAs + '/', asMetadata)
+    const prm = (req, reply) => {
+      reply.type('application/json')
+      return { resource: href(req, '/' + (req.params['*'] || '')), authorization_servers: [issuerOf(req)] }
+    }
+    scope.get(wellKnownPrm, prm)
+    scope.get(wellKnownPrm + '/', prm)
+    scope.get(wellKnownPrm + '/*', prm)
+
     scope.all(prefix + '/*', route((req) => '/' + (req.params['*'] || '')))
     scope.all(prefix + '/', route(() => '/'))
     scope.all(prefix, (req, reply) => reply.redirect(prefix + '/', 308))

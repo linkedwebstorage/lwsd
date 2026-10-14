@@ -60,6 +60,10 @@ console.log('\n=== authz: ODRL access grants (12/12) ===')
 const admin = execFileSync('node', [join(here, 'grants.js'), '--emit-admin']).toString()
 const r4 = await battery('grants', { port: 5604, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: admin }, script: 'grants.js' })
 
-const all = [r1, r2, r3, r4]
-console.log(`\n${'='.repeat(50)}\n${all.filter(Boolean).length}/4 batteries passed`)
+console.log('\n=== authorization server: token exchange + at+jwt validation (19/19) ===')
+const asAlice = execFileSync('node', [join(here, 'as.js'), '--emit-did']).toString()
+const r5 = await battery('as', { port: 5605, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: asAlice }, script: 'as.js' })
+
+const all = [r1, r2, r3, r4, r5]
+console.log(`\n${'='.repeat(50)}\n${all.filter(Boolean).length}/${all.length} batteries passed`)
 process.exit(all.every(Boolean) ? 0 : 1)

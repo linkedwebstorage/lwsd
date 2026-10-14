@@ -7,7 +7,7 @@ lws10-authn-ssi-did-key, and lws10-authn-ssi-cid.
 Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js`, `didkey.js`,
 `jwt.js`) as a JSS plugin (jss ≥ 0.0.219).
 
-## Batteries — `npm test` runs all four (88 checks)
+## Batteries — `npm test` runs all five (107 checks)
 
 | Battery | Checks | Server config | Covers |
 |---|---|---|---|
@@ -15,6 +15,7 @@ Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js
 | `auth.js` | 6 | `LWS_WRITERS=<did:key>` | 401 challenge + did:key self-issued JWT accept/reject |
 | `cid.js` | 3 | `LWS_WRITERS=<sub> LWS_CID_ALLOW_LOOPBACK=1` | CID self-issued JWT: dereference `sub` → controlled identifier doc → verify |
 | `grants.js` | 12 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<admin>` | ODRL access-grant engine: read-gating, foaf:Agent public grants, action scoping, dateTime constraints, authz-filtered search |
+| `as.js` | 19 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<did:key>` | authorization server: RFC 8414 metadata, JWKS, RFC 8693 token exchange (valid / invalid_target / unsupported_grant_type / expired / wrong audience / corrupted), `at+jwt` validation at the storage (corrupted, alg none, unknown kid), RFC 9728 resource metadata, owner vs non-owner |
 
 ```bash
 JSS_BIN=$(command -v jss) npm test        # orchestrates all four on scratch ports
@@ -82,8 +83,17 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
 - [ ] **did:key authn suite discontinued** (#229, 18 Sep); CID suite clarifies DID subjects (#233).
   `didkey.js` becomes legacy; a `did:key` subject should go through the CID path.
 - [ ] **Search: GET/POST → HTTP QUERY** (#179); searchindex renamed lws10-index (#249).
-- [ ] **Auth discovery via RFC 9728 Protected Resource Metadata** (#256, 14 Oct); AS metadata
-  `subject_identifier_types_supported` (#227); token subject type metadata renamed (#221).
+- [x] **Authorization server** (Authorization.html): `lws/as.js` — RFC 8693 token exchange at
+  `/-/token`, RFC 8414 metadata at `/.well-known/lws-configuration<prefix>` (a root path, claimed
+  via jss `api.reservePath`), JWKS at `/-/jwks`, ES256 `at+jwt` access tokens (RFC 9068; `kid` =
+  RFC 7638 thumbprint; 300 s, `LWS_AS_TOKEN_LIFETIME` to change). Subject tokens: self-issued
+  did:key and CID JWTs audienced to the issuer. The storage validates `at+jwt` (signature, `iss`,
+  `aud` = storage, `exp`/`nbf`/`iat`) and never falls through from one; direct credentials are still
+  accepted (`LWS_ACCEPT_CREDENTIALS=0` turns that off). C12 is resolved.
+- [x] **Auth discovery via RFC 9728 Protected Resource Metadata** (#256, 14 Oct): the 401 challenge
+  carries `resource_metadata` (and still `as_uri` / `realm`); the document is served at
+  `/.well-known/oauth-protected-resource<prefix><path>` with `authorization_servers: [issuer]`.
+  AS metadata has `subject_identifier_types_supported` (#227).
 - [ ] Notification envelopes: Activity Streams terms → dcterms + LWS (#219); core notification
   model folded into lws10-core (#185).
 - [ ] Slug dropped from spec text (#224) — keep accepting it, stop relying on it in tests.
