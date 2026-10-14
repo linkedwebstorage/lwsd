@@ -374,6 +374,10 @@ export async function activate (api) {
     const rm = `${baseUrl(req)}/.well-known/oauth-protected-resource${requestPath(req)}`
     reply.header('www-authenticate',
       `Bearer resource_metadata="${rm}", as_uri="${issuerOf(req)}", realm="${storageId(req)}", error="invalid_token"`)
+    // A browser client on another origin can only read the challenge if it
+    // is exposed; the host's CORS hook sets the list before we run, so widen it.
+    const exposed = String(reply.getHeader('access-control-expose-headers') || '')
+    if (!/www-authenticate/i.test(exposed)) reply.header('access-control-expose-headers', (exposed ? exposed + ', ' : '') + 'WWW-Authenticate')
     // Discovery.html: the storage link is on every GET/HEAD response for a
     // storage resource, a 401 included — a client with no credentials still
     // has to find the storage (and from it the authorization server).

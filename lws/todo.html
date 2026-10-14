@@ -181,8 +181,16 @@
   async function discover () {
     const r = await req('POST', storageUrl(), {}, 'anonymous probe → 401 challenge');
     const wa = r.headers.get('www-authenticate') || '';
-    const asUri = /as_uri="([^"]+)"/.exec(wa)?.[1];
-    if (r.status !== 401 || !asUri) throw new Error(`expected a 401 with as_uri from ${storageUrl()}, got ${r.status}`);
+    if (r.status !== 401) throw new Error(`expected a 401 challenge from ${storageUrl()}, got ${r.status}`);
+    let asUri = /as_uri="([^"]+)"/.exec(wa)?.[1];
+    if (!asUri) {
+      // Cross-origin, a server has to expose WWW-Authenticate for us to read it.
+      // When it doesn't, assume the storage is its own authorization server
+      // (RFC 8414: metadata under the origin, the issuer's path appended).
+      const s = new URL(storageUrl());
+      asUri = s.origin + s.pathname.replace(/\/$/, '');
+      note(wa ? 'challenge not readable cross-origin — assuming the storage is its own AS' : 'no WWW-Authenticate readable — assuming the storage is its own AS');
+    }
     const u = new URL(asUri);
     const meta = await (await req('GET', `${u.origin}/.well-known/lws-configuration${u.pathname.replace(/\/$/, '')}`, {}, 'AS metadata')).json();
     as = { issuer: meta.issuer, tokenEndpoint: meta.token_endpoint, realm: /realm="([^"]+)"/.exec(wa)?.[1] || storageUrl() };
