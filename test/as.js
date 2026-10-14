@@ -35,8 +35,9 @@ const check = (id, name, ok, note = '') => { results.push({ ok }); console.log(`
 const decode = (t) => { const [h, p] = t.split('.'); return { header: JSON.parse(Buffer.from(h, 'base64url')), claims: JSON.parse(Buffer.from(p, 'base64url')) } }
 const now = () => Math.floor(Date.now() / 1000)
 
-// 1. challenge → AS discovery
-let r = await fetch(STORAGE)
+// 1. challenge → AS discovery (the root *container*; the storage
+// description at the same URI is public by design)
+let r = await fetch(STORAGE, { headers: { accept: 'application/lws+json' } })
 const wa = r.headers.get('www-authenticate') || ''
 const asUri = /as_uri="([^"]+)"/.exec(wa)?.[1]
 const realm = /realm="([^"]+)"/.exec(wa)?.[1]

@@ -107,6 +107,7 @@ export async function activate (api) {
   const as = await new AuthorizationServer({
     dir: priv,
     lifetime: config.tokenLifetime || parseInt(process.env.LWS_AS_TOKEN_LIFETIME, 10) || 300,
+    keyJwk: config.signingKey || process.env.LWS_AS_KEY_JWK || undefined,
     log,
   }).init()
   // Pre-baseline behaviour (CONFORMANCE.md C12): also accept a did:key / CID
@@ -487,12 +488,20 @@ export async function activate (api) {
 
   // --- notifications helpers ---------------------------------------------------
 
+  // Delivery-time check: does the subscriber still have read access to the
+  // changed resource? Anonymous subscribers see what the public sees.
+  const subscriberMayRead = (resourceUri, resourceType) => async (sub) => {
+    if (publicRead) return true
+    const agent = sub.subscriber && sub.subscriber !== 'anonymous' ? sub.subscriber : null
+    if (agent && writers.includes(agent)) return true
+    return evalGrants(grants(), { agent, action: 'read', resourceUri, resourceType: resourceType || [], client: agent, purpose: null })
+  }
   const emit = (req, type, urlPath, isContainer, extra = {}) =>
     notifier.emit(storageId(req), {
       type: [type],
       object: { id: href(req, urlPath), type: [isContainer ? 'Container' : 'DataResource'] },
       ...extra,
-    })
+    }, subscriberMayRead(href(req, urlPath), [LWS + (isContainer ? 'Container' : 'DataResource'), ...(typeIndex[urlPath]?.types || [])]))
 
   // --- service routes under /-/ -------------------------------------------------
 
@@ -614,6 +623,16 @@ export async function activate (api) {
           if (hrefs.length) cur[rel] = hrefs
         }
         await fs.writeFile(metaFile(target), JSON.stringify(cur))
+        // User-managed relations are searchable too (lws10-index: relation
+        // targets come from "Link headers, server-intrinsic state, or parsed
+        // content" — a linkset is that state).
+        const ix = typeIndex[target] || { types: [LWS + (isC ? 'Container' : 'DataResource')], rels: {} }
+        ix.rels = ix.rels || {}
+        for (const r of ix.linksetRels || []) delete ix.rels[r] // relations the previous linkset set
+        Object.assign(ix.rels, cur)
+        ix.linksetRels = Object.keys(cur)
+        typeIndex[target] = ix
+        saveTypeIndex().catch(() => {})
         emit(req, 'Update', target, isC)
         reply.code(204).header('etag', linksetEtag(await render())); return reply.send()
       }
@@ -630,13 +649,20 @@ export async function activate (api) {
     // notification subscriptions (lws10-notifications)
     if (urlPath === '/-/subscriptions' || urlPath === '/-/subscriptions/') {
       if (req.method === 'POST') {
-        const agent = await authorizeWrite(req, reply); if (!agent) return
+        // Any authenticated agent may subscribe — to topics it can read
+        // (lws10-notifications: "MUST reject if the subscriber lacks read
+        // access to all topics"; CONFORMANCE.md C13).
+        const agent = await agentOf(req) || (anonWrites || publicRead ? 'anonymous' : null)
+        if (!agent) { challenge(reply, req); return problem(reply, 401, 'Unauthorized', 'authentication required') }
         const b = req.body || {}
         if (b.type !== 'WebhookSubscription') return problem(reply, 400, 'Bad Request', 'unsupported subscription type')
         if (!Array.isArray(b.topic) || !b.topic.length) return problem(reply, 400, 'Bad Request', 'topic array required')
-        if (typeof b.inbox !== 'string') return problem(reply, 400, 'Bad Request', 'inbox required')
-        // subscription authorization: reads are public in v1, so read access
-        // to all topics holds; enforce topic shape only (CONFORMANCE.md C13)
+        if (typeof b.inbox !== 'string' || !isAbsoluteUri(b.inbox)) return problem(reply, 400, 'Bad Request', 'inbox (a URI) required')
+        for (const t of b.topic) {
+          if (typeof t !== 'string' || !t.startsWith(storageId(req))) return problem(reply, 400, 'Bad Request', `topic is not in this storage: ${t}`)
+          const tPath = '/' + t.slice(storageId(req).length)
+          if (!await canRead(req, t, typeIndex[tPath]?.types)) return problem(reply, 403, 'Forbidden', `no read access to topic ${t}`)
+        }
         const sub = await notifier.create({ topic: b.topic, inbox: b.inbox, expires: b.expires, subscriber: agent })
         const subUrl = href(req, '/-/subscriptions/' + sub.id)
         reply.code(200).type(LWS_JSON).header('location', subUrl)
@@ -713,6 +739,11 @@ export async function activate (api) {
           }
           if (v.length) filters[k] = parseGroups(v)
         }
+      } else if (typeof req.query?.q === 'string') {
+        // A page of an earlier QUERY: the filter rides in the opaque page
+        // URI (lws10-index: page URIs are opaque, the filter is in the body
+        // and so cannot be re-sent on a GET). Unrecognisable → 404.
+        try { Object.assign(filters, JSON.parse(Buffer.from(req.query.q, 'base64url').toString())) } catch { return problem(reply, 404, 'Not Found', 'unknown page') }
       } else {
         for (const [k, v] of Object.entries(req.query || {})) {
           if (k === 'page') continue
@@ -726,8 +757,11 @@ export async function activate (api) {
         }
       }
       const matches = (await visibleEntries(req, searchIndex(filters)))
-      const paged = paginate(reply, req, '/-/types/search', matches)
-      reply.type(LWS_JSON).header('cache-control', 'private').header('vary', 'Accept')
+      const pageToken = Object.keys(filters).length ? '&q=' + Buffer.from(JSON.stringify(filters)).toString('base64url') : ''
+      const paged = paginate(reply, req, '/-/types/search', matches, pageToken)
+      // Same conneg as a container listing: lws+json by default, ld+json /
+      // json on request (lws-media-type.md); the body is identical.
+      reply.type(negotiate(req)).header('cache-control', 'private').header('vary', 'Accept')
       if (method === 'HEAD') return reply.send()
       return { '@context': CONTEXT, type: 'ContainerPage', totalItems: paged.total, items: paged.items }
     }
@@ -752,6 +786,12 @@ export async function activate (api) {
           const obj = { ...(req.body || {}), id: href(req, `${base}/${id}`), type: kind === 'request' ? 'AccessRequest' : 'AccessGrant', issued: new Date().toISOString(), creator: agent }
           access[kind][id] = obj
           await saveAccess(kind)
+          // "When an inbox property is present on an access request or
+          // access grant, the server … " announces it there: a signed
+          // Notification whose activity creates the document.
+          if (typeof obj.inbox === 'string') {
+            notifier.notifyInbox(obj.inbox, storageId(req), { type: ['Create'], object: { id: obj.id, type: [obj.type] } })
+          }
           reply.code(201).header('location', obj.id).type(LWS_JSON)
           return { '@context': CONTEXT, ...obj }
         }
@@ -795,19 +835,20 @@ export async function activate (api) {
       case 'GET':
       case 'HEAD': {
         if (!st) return problem(reply, 404, 'Not Found')
+        // The storage description is public: clients discover the
+        // authorization server from it before they hold any credential, and
+        // notification receivers resolve the signing key through it.
+        if (urlPath === '/' && wantsDescription(req)) {
+          reply.header('vary', 'Accept')
+          const desc = storageDescription(req, reply)
+          return req.method === 'HEAD' ? reply.send() : desc
+        }
         if (!publicRead) {
           const rt = [st.isDirectory() ? LWS + 'Container' : LWS + 'DataResource', ...(typeIndex[urlPath]?.types || [])]
           if (!await authorize(req, reply, urlPath, { resourceType: rt, mediaType: st.isDirectory() ? LWS_JSON : formatOf(urlPath, abs) })) return
         }
         if (st.isDirectory()) {
           const cPath = urlPath.endsWith('/') ? urlPath : urlPath + '/'
-          // The storage URI is the root container: with no Accept, */*, or
-          // lws+cid it answers the storage description (Discovery.html).
-          if (cPath === '/' && wantsDescription(req)) {
-            reply.header('vary', 'Accept')
-            const desc = storageDescription(req, reply)
-            return req.method === 'HEAD' ? reply.send() : desc
-          }
           const etag = await containerEtag(abs)
           if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
           lwsHeaders(reply, req, cPath, true)

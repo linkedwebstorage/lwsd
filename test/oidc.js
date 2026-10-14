@@ -58,8 +58,8 @@ function idToken (claims, { key = keys.op, kid = 'op-key', alg = 'ES256' } = {})
   return `${h}.${p}.${s}`
 }
 
-// AS discovery from the challenge
-let r = await fetch(BASE + '/')
+// AS discovery from the challenge (on the root container; the description is public)
+let r = await fetch(BASE + '/', { headers: { accept: 'application/lws+json' } })
 const asUri = /as_uri="([^"]+)"/.exec(r.headers.get('www-authenticate') || '')?.[1]
 const u = new URL(asUri)
 const meta = await (await fetch(`${u.origin}/.well-known/lws-configuration${u.pathname.replace(/\/$/, '')}`)).json()

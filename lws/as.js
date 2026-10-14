@@ -40,15 +40,30 @@ const thumbprint = (jwk) => createHash('sha256')
   .update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })).digest('base64url')
 
 export class AuthorizationServer {
-  constructor ({ dir, lifetime = 300, subjectIdentifierTypes = ['https', 'did:key'], log } = {}) {
+  constructor ({ dir, lifetime = 300, subjectIdentifierTypes = ['https', 'did:key'], keyJwk, log } = {}) {
     this.keyFile = path.join(dir, 'as-key.json')
     this.lifetime = lifetime
     this.subjectIdentifierTypes = subjectIdentifierTypes
+    this.keyJwk = keyJwk // an operator-supplied P-256 private JWK (object, JSON, or a file path)
     this.log = log
     this.key = null
   }
 
   async init () {
+    if (this.keyJwk) {
+      // A key the operator holds too — a deployment that shares it with a
+      // test harness (Touchstone's HarnessIssuedTokens), or rotates it from
+      // outside. Its kid, if given, is kept so tokens minted elsewhere match.
+      let jwk = this.keyJwk
+      if (typeof jwk === 'string') {
+        try { jwk = JSON.parse(jwk) } catch { jwk = JSON.parse(await fs.readFile(jwk, 'utf8')) }
+      }
+      if (jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !jwk.d) throw new Error('lws as: the signing key must be a P-256 private JWK')
+      const { d, ...pub } = jwk
+      this.key = { privatePem: createPrivateKey({ key: jwk, format: 'jwk' }).export({ type: 'pkcs8', format: 'pem' }), publicJwk: { kty: pub.kty, crv: pub.crv, x: pub.x, y: pub.y } }
+      this.kid = jwk.kid || thumbprint(this.key.publicJwk)
+      return this
+    }
     try {
       this.key = JSON.parse(await fs.readFile(this.keyFile, 'utf8'))
     } catch {
@@ -108,7 +123,11 @@ export class AuthorizationServer {
     const c = d.claims
     const now = Math.floor(Date.now() / 1000)
     if (c.iss !== issuer) return null
-    if (![].concat(c.aud ?? []).includes(audience)) return null
+    // Exactly this storage, and only this storage: a token audienced to two
+    // storages is good for replay at the other one, so it is refused even
+    // though one of its audiences is ours.
+    const aud = [].concat(c.aud ?? [])
+    if (aud.length !== 1 || aud[0] !== audience) return null
     if (typeof c.exp !== 'number' || c.exp < now - skew) return null
     if (typeof c.nbf === 'number' && c.nbf > now + skew) return null
     if (typeof c.iat !== 'number' || c.iat > now + skew) return null

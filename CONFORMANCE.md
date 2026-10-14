@@ -7,6 +7,18 @@ lws10-authn-ssi-did-key, and lws10-authn-ssi-cid.
 Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js`, `didkey.js`,
 `jwt.js`) as a JSS plugin (jss ≥ 0.0.219).
 
+## Touchstone — conformant
+
+[Touchstone](https://github.com/ebremer/touchstone) `5c49679` (5 Oct 2026 definitions), run by
+`scripts/touchstone.sh --auth` (Authentication, ReachableFixtures, HarnessIssuedTokens declared;
+public read off; alice the writer; page size 4), 14 Oct 2026:
+
+**196 passed, 0 failed, 0 cantTell, 7 inapplicable — conformant.** The inapplicable seven: three
+need `SamlTrust`, four are preconditions for optional behaviour (`Content-Location` on search
+results, a paginated-but-single-page listing, a first-page link on a one-page search, container
+access that does not reach members). As an open target (`scripts/touchstone.sh`): 64 passed, 0
+failed, 139 inapplicable — conformant.
+
 ## Batteries — `npm test` runs all six (131 checks)
 
 | Battery | Checks | Server config | Covers |
@@ -103,8 +115,18 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   carries `resource_metadata` (and still `as_uri` / `realm`); the document is served at
   `/.well-known/oauth-protected-resource<prefix><path>` with `authorization_servers: [issuer]`.
   AS metadata has `subject_identifier_types_supported` (#227).
+- [x] **Webhooks, end to end against the harness inbox**: any authenticated agent may subscribe to
+  topics it can read (C13 resolved); read permission is re-checked at delivery time, so a revoked
+  grant silences a subscription; 5xx / network failures are retried with backoff, 410 Gone or five
+  consecutive failures deactivate the subscription (`active: false`); a grant or request carrying an
+  `inbox` is announced there with the same signed envelope. The storage description is public, so a
+  receiver can resolve the RFC 9421 `keyid` without credentials.
+- [x] **Authentication suites via the AS**: OpenID Connect ID Tokens (`lws/oidc.js`), CID with HTTPS
+  subjects (fixture-hosted documents, `LWS_CID_ALLOW_LOOPBACK=1` for the harness), did:key.
+  `LWS_AS_KEY_JWK` lets an operator supply the signing key — the harness's `HarnessIssuedTokens`
+  needs the same key, so `scripts/touchstone.sh --auth` generates one per run and declares it.
 - [ ] Notification envelopes: Activity Streams terms → dcterms + LWS (#219); core notification
-  model folded into lws10-core (#185).
+  model folded into lws10-core (#185). (The harness accepts the AS2-shaped envelope today.)
 - [ ] Slug dropped from spec text (#224) — keep accepting it, stop relying on it in tests.
 - [ ] ETag language aligned with RFC 9110 (#228) — re-check 428/412/304 edge cases.
 

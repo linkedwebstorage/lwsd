@@ -129,7 +129,16 @@ if [ "$AUTH" = 1 ]; then
   # choosing; the CID / OIDC verifiers must be allowed to fetch loopback.
   FIXTURES_PORT=$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")
   FIXTURES_URL="http://127.0.0.1:$FIXTURES_PORT/"
+  # The authorization server's key is generated here and handed to the
+  # harness too (HarnessIssuedTokens), so it can mint tokens with one chosen
+  # defect — wrong audience, wrong issuer, expired — that only the key
+  # holder can produce. A throwaway key in a throwaway directory.
+  node -e "const {generateKeyPairSync,createHash}=require('crypto');const k=generateKeyPairSync('ec',{namedCurve:'P-256'}).privateKey.export({format:'jwk'});k.kid=createHash('sha256').update(JSON.stringify({crv:k.crv,kty:k.kty,x:k.x,y:k.y})).digest('base64url');k.alg='ES256';process.stdout.write(JSON.stringify(k))" > "$WORK/as.jwk"
+  AS_JWK=$(cat "$WORK/as.jwk")
+  # Page size 4 so the pagination tests apply (they need a five-member
+  # container to split).
   LWS_PUBLIC_READ=0 LWS_WRITERS="$ALICE_DID" LWS_AS_TOKEN_LIFETIME=3600 LWS_CID_ALLOW_LOOPBACK=1 \
+  LWS_AS_KEY_JWK="$WORK/as.jwk" LWS_PAGE_SIZE=4 \
     "$JSS_BIN" start --port "$PORT" --host 127.0.0.1 --root "$DATA" \
     --public --no-git --no-idp --plugin "$ROOT/lws/plugin.js@/lws" > "$WORK/jss.log" 2>&1 &
 else
@@ -148,6 +157,7 @@ for _ in $(seq 1 60); do
 done
 up || { echo "lwsd did not come up on $BASE_URL" >&2; cat "$WORK/jss.log" >&2; exit 2; }
 echo "lwsd: jss $("$JSS_BIN" --version) + lws plugin at $BASE_URL"
+TARGET_URL="$BASE_URL"
 
 if [ "$AUTH" = 1 ]; then
   # alice's key is the one the server was told about; bob's is fresh. Both
@@ -156,7 +166,16 @@ if [ "$AUTH" = 1 ]; then
   eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/alice.jwk" --env alice --ttl 3600)"
   eval "$(node "$ROOT/scripts/mint-token.js" "$BASE_URL" --key "$WORK/bob.jwk" --env bob --ttl 3600)"
   export TOUCHSTONE_TOKEN_ALICE TOUCHSTONE_WEBID_ALICE TOUCHSTONE_TOKEN_BOB TOUCHSTONE_WEBID_BOB
-  CAPABILITIES="${CAPABILITIES:+$CAPABILITIES,}Authentication,ReachableFixtures"
+  CAPABILITIES="${CAPABILITIES:+$CAPABILITIES,}Authentication,ReachableFixtures,HarnessIssuedTokens"
+  # The target is a container inside the storage, not the storage URI: the
+  # storage URI answers its (public) description to an anonymous GET, while
+  # the harness learns the authorization server from the 401 that an
+  # anonymous GET of the target gives. targets.md: "a container in the
+  # storage under test … the storage root is the usual choice" — not here.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL" -H "Authorization: Bearer $TOUCHSTONE_TOKEN_ALICE" \
+    -H 'Slug: harness' -H 'Link: <https://www.w3.org/ns/lws#Container>; rel="type"')
+  [ "$code" = 201 ] || { echo "could not create the harness container as alice: $code" >&2; exit 2; }
+  TARGET_URL="${BASE_URL}harness/"
   echo "auth: alice=$TOUCHSTONE_WEBID_ALICE bob=$TOUCHSTONE_WEBID_BOB (capabilities: $CAPABILITIES; fixtures at $FIXTURES_URL)"
 fi
 
@@ -166,9 +185,9 @@ mkdir -p "$REPORTS"
 caps=""
 for c in ${CAPABILITIES//,/ }; do caps="${caps:+$caps, }$c"; done
 printf 'targets:\n  sut:\n    baseUrl: "%s"\n    adapter: env\n    capabilities: [%s]\n' \
-  "$BASE_URL" "$caps" > "$WORK/targets.yaml"
+  "$TARGET_URL" "$caps" > "$WORK/targets.yaml"
 if [ -n "${FIXTURES_URL:-}" ]; then
-  printf '    properties:\n      fixtures.baseUrl: "%s"\n' "$FIXTURES_URL" >> "$WORK/targets.yaml"
+  printf '    properties:\n      fixtures.baseUrl: "%s"\n      as.signingKey: '"'"'%s'"'"'\n' "$FIXTURES_URL" "$AS_JWK" >> "$WORK/targets.yaml"
 else
   printf '    properties: {}\n' >> "$WORK/targets.yaml"
 fi
