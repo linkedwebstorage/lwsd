@@ -30,10 +30,9 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MODULE=all
 PORT=auto
-# master's Dockerfile omits the harness-clients module added in 7b13c27
-# (ebremer/touchstone#2, fix in #3). Last commit before that. Move to master
-# or a tag once the fix has landed.
-REF=5c49679385de2ec087787a46e533cb741c018274
+# Touchstone's master (ebremer/touchstone#3 fixed the image build on
+# 14 Oct 2026). Pin a commit with --ref to reproduce an older run.
+REF=master
 REPORTS="$ROOT/.touchstone/runs"
 CAPABILITIES=""
 BUILD=1

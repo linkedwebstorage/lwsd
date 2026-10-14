@@ -9,14 +9,15 @@ Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js
 
 ## Touchstone — conformant
 
-[Touchstone](https://github.com/ebremer/touchstone) `5c49679` (5 Oct 2026 definitions), run by
+[Touchstone](https://github.com/ebremer/touchstone) `master` at `6a3206e` (205 tests), run by
 `scripts/touchstone.sh --auth` (Authentication, ReachableFixtures, HarnessIssuedTokens declared;
 public read off; alice the writer; page size 4), 14 Oct 2026:
 
-**196 passed, 0 failed, 0 cantTell, 7 inapplicable — conformant.** The inapplicable seven: three
-need `SamlTrust`, four are preconditions for optional behaviour (`Content-Location` on search
-results, a paginated-but-single-page listing, a first-page link on a one-page search, container
-access that does not reach members). As an open target (`scripts/touchstone.sh`): 64 passed, 0
+**197 passed, 0 failed, 0 cantTell, 8 inapplicable — conformant.** The inapplicable eight: three
+need `SamlTrust`, five are preconditions for optional behaviour (`Content-Location` on search
+results, a paginated-but-single-page listing, a first-page link on a one-page search,
+`Prefer: set-linkset` combined updates, container access that does not reach members). Erich Bremer's
+independent run of the same commit gives the same numbers: <https://ebremer.com/lws/conformance>. As an open target (`scripts/touchstone.sh`): 64 passed, 0
 failed, 139 inapplicable — conformant.
 
 ## Batteries — `npm test` runs all six (134 checks)
