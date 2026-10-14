@@ -139,8 +139,9 @@ specification module:
 
 The seven that are not passes are inapplicable, not failures: three need SAML, four are preconditions
 for optional behaviour (`Content-Location` on search results, page links on a one-page listing or
-search, container access that does not reach members). Run it yourself with
-`scripts/touchstone.sh --auth`; the EARL report lands in `.touchstone/runs/`.
+search, container access that does not reach members). The full report of that run — EARL, HTML,
+JUnit — is in [`reports/touchstone/2026-10-14-5c49679/`](reports/touchstone/2026-10-14-5c49679/).
+Run it yourself with `scripts/touchstone.sh --auth`; a fresh report lands in `.touchstone/runs/`.
 
 Outside the harness's reach: notification envelopes still use the Activity Streams shape the
 harness accepts (the draft moved to dcterms, w3c/lws-protocol#219); `LWS_ACCEPT_CREDENTIALS`
