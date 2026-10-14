@@ -65,6 +65,24 @@ export function didKeyToJwk (did) {
   return null
 }
 
+// Public JWK → did:key (the inverse of didKeyToJwk), for minting clients
+// and tests. OKP Ed25519 → 0xed01 ‖ raw; EC P-256 → 0x8024 ‖ compressed SEC1.
+export function jwkToDidKey (jwk) {
+  let bytes
+  if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') {
+    bytes = Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.from(jwk.x, 'base64url')])
+  } else if (jwk.kty === 'EC' && jwk.crv === 'P-256') {
+    const y = Buffer.from(jwk.y, 'base64url')
+    bytes = Buffer.concat([Buffer.from([0x80, 0x24, 0x02 | (y[y.length - 1] & 1)]), Buffer.from(jwk.x, 'base64url')])
+  } else {
+    throw new Error('jwkToDidKey: Ed25519 or P-256 only')
+  }
+  let n = BigInt('0x' + bytes.toString('hex')); let s = ''
+  while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n }
+  for (const b of bytes) { if (b === 0) s = '1' + s; else break }
+  return 'did:key:z' + s
+}
+
 // Returns the did:key subject on success, null otherwise.
 export function verifySelfIssuedJwt (token) {
   const d = decodeJwt(token)

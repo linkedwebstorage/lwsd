@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "touchstone": "scripts/touchstone.sh"
   },
   "repository": {
     "type": "git",

@@ -63,6 +63,9 @@ function constraintSatisfied (c, ctx) {
   switch (lo) {
     case 'client': return ctx.client != null && cmp(op, ctx.client, ro)
     case 'purpose': return ctx.purpose != null && cmp(op, ctx.purpose, ro)
+    // `format` is the draft's name for "the media type of the target HTTP
+    // resource"; `mediaType` is kept for grants written against the July text.
+    case 'format':
     case 'mediaType': return ctx.mediaType != null && cmp(op, ctx.mediaType, ro)
     case 'type': {
       const declared = ctx.resourceType || []

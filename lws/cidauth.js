@@ -45,6 +45,33 @@ function isPrivate (ip) {
   return false
 }
 
+// Guarded, cached JSON fetch — shared with the OpenID verifier, which
+// dereferences the same kind of document and the OP's discovery and JWKS.
+export async function fetchJson (url, allowLoopback) {
+  const hit = cache.get(url)
+  if (hit && hit.exp > Date.now()) return hit.body
+  const body = await safeFetch(url, allowLoopback)
+  if (body) cache.set(url, { body, exp: Date.now() + TTL })
+  return body
+}
+
+// CID 1.0: the credential's key must be a verification method the document
+// lists *for authentication* — embedded in `authentication`, or referenced
+// there by id and defined under `verificationMethod`. A method the document
+// lists only under verificationMethod (or only for assertion) does not
+// authenticate. The method's controller must be the document's subject, and
+// a method that is revoked or expired is no method.
+function authenticationMethod (cid, kid) {
+  const matches = (m) => m && typeof m === 'object' &&
+    (m.id === kid || (typeof m.id === 'string' && m.id.endsWith('#' + kid)) || m.publicKeyJwk?.kid === kid)
+  const byId = (id) => [].concat(cid.verificationMethod ?? []).find((m) => m && typeof m === 'object' && m.id === id)
+  for (const entry of [].concat(cid.authentication ?? [])) {
+    const m = typeof entry === 'string' ? byId(entry) : entry
+    if (matches(m)) return m
+  }
+  return null
+}
+
 // Returns the subject URI on success, null otherwise.
 export async function verifyCidJwt (token, { allowLoopback = false } = {}) {
   const d = decodeJwt(token)
@@ -52,22 +79,14 @@ export async function verifyCidJwt (token, { allowLoopback = false } = {}) {
   const sub = d.claims.sub
   if (!/^https?:\/\//.test(sub)) return null
 
-  let doc = cache.get(sub)
-  if (!doc || doc.exp < Date.now()) {
-    const fetched = await safeFetch(sub, allowLoopback)
-    if (!fetched) return null
-    doc = { body: fetched, exp: Date.now() + TTL }
-    cache.set(sub, doc)
-  }
-  const cid = doc.body
-  if (cid.id !== sub) return null
+  const cid = await fetchJson(sub, allowLoopback)
+  if (!cid || cid.id !== sub) return null
 
-  const kid = d.header.kid
-  const methods = [].concat(cid.authentication || [], cid.verificationMethod || [])
-  const vm = methods.find((m) => {
-    if (typeof m === 'string') return m === kid || m.endsWith('#' + kid)
-    return m.id === kid || m.id?.endsWith('#' + kid) || m.publicKeyJwk?.kid === kid
-  })
-  if (!vm || typeof vm === 'string' || !vm.publicKeyJwk) return null
+  const vm = authenticationMethod(cid, d.header.kid)
+  if (!vm || !vm.publicKeyJwk) return null
+  if (vm.controller !== undefined && ![].concat(vm.controller).includes(sub)) return null
+  const now = Date.now()
+  if (typeof vm.revoked === 'string' && Date.parse(vm.revoked) <= now) return null
+  if (typeof vm.expires === 'string' && Date.parse(vm.expires) <= now) return null
   return verifyJwtWithJwk(d, vm.publicKeyJwk) ? sub : null
 }

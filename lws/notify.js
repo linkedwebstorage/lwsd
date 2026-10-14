@@ -68,22 +68,66 @@ export class Notifier {
   get (id) { return this.subs[id] }
   async remove (id) { delete this.subs[id]; await this.persist() }
 
-  // Container topics are recursive; data-resource topics are exact.
+  // Container topics are recursive; data-resource topics are exact. An
+  // expired or deactivated subscription matches nothing.
   matches (sub, resourceUri) {
+    if (sub.active === false) return false
     if (sub.expires && Date.parse(sub.expires) < Date.now()) return false
     return sub.topic.some((t) => t.endsWith('/') ? (resourceUri === t || resourceUri.startsWith(t)) : resourceUri === t)
   }
 
-  // Emit an activity; deliver to every matching subscription (fire-and-forget).
-  emit (storageId, activity) {
+  // Emit an activity; deliver to every matching subscription whose
+  // subscriber may still read the resource — `allow(sub, resourceUri)` is
+  // asked at delivery time, so a revoked grant silences a subscription
+  // without anyone having to delete it. Fire-and-forget.
+  emit (storageId, activity, allow = async () => true) {
     const full = { id: randomUUID(), published: new Date().toISOString(), ...activity }
     for (const sub of Object.values(this.subs)) {
       if (!this.matches(sub, full.object.id)) continue
-      this.deliver(sub, storageId, full).catch((err) => this.log?.warn(`lws notify: delivery to ${sub.inbox} failed: ${err.message}`))
+      Promise.resolve(allow(sub, full.object.id))
+        .then((ok) => ok && this.deliverWithRetry(sub, storageId, full))
+        .catch((err) => this.log?.warn(`lws notify: delivery to ${sub.inbox} failed: ${err.message}`))
     }
     return full
   }
 
+  // Announce something to a standalone inbox — an access request's or
+  // grant's `inbox` (lws-access-requests.html). Same envelope and
+  // signature as a subscription delivery; no subscription involved.
+  notifyInbox (inbox, storageId, activity) {
+    const full = { id: randomUUID(), published: new Date().toISOString(), ...activity }
+    this.deliver({ inbox }, storageId, full).catch((err) => this.log?.warn(`lws notify: announcement to ${inbox} failed: ${err.message}`))
+    return full
+  }
+
+  // "On failure, the server MAY retry delivery": a 5xx or a network error
+  // is tried again, backing off. An inbox that answers 410 Gone, or that
+  // fails FAILURE_LIMIT deliveries in a row, deactivates the subscription;
+  // a success resets the count.
+  async deliverWithRetry (sub, storageId, activity) {
+    const delays = [500, 2000, 5000]
+    for (let attempt = 0; ; attempt++) {
+      let status
+      try {
+        status = await this.deliver(sub, storageId, activity)
+      } catch (err) {
+        status = 0
+        this.log?.warn(`lws notify: ${sub.inbox}: ${err.message}`)
+      }
+      if (status >= 200 && status < 300) { sub.failures = 0; await this.persist(); return }
+      if (status === 410) { sub.active = false; await this.persist(); return }
+      const retryable = status === 0 || status >= 500 || status === 429
+      if (!retryable || attempt >= delays.length) {
+        sub.failures = (sub.failures || 0) + 1
+        if (sub.failures >= Notifier.FAILURE_LIMIT) sub.active = false
+        await this.persist()
+        return
+      }
+      await new Promise((r) => setTimeout(r, delays[attempt]))
+    }
+  }
+
+  // One signed POST; resolves to the inbox's status (throws on a network error).
   async deliver (sub, storageId, activity) {
     const body = JSON.stringify({
       '@context': ['https://www.w3.org/ns/lws/v1', 'https://www.w3.org/ns/activitystreams'],
@@ -119,6 +163,7 @@ export class Notifier {
       },
       body,
     })
-    if (!res.ok) throw new Error(`inbox answered ${res.status}`)
+    return res.status
   }
 }
+Notifier.FAILURE_LIMIT = 5

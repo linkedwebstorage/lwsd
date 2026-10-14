@@ -22,10 +22,21 @@ import { Notifier } from './notify.js'
 import { verifySelfIssuedJwt } from './didkey.js'
 import { verifyCidJwt } from './cidauth.js'
 import { evaluate as evalGrants, HTTP_TO_ACTION } from './access.js'
+import { apply as applyJsonPatch, PatchError } from './jsonpatch.js'
+import { AuthorizationServer, OAuthError, TOKEN_TYPE_JWT, TOKEN_TYPE_ID_TOKEN, normalizeTokenType } from './as.js'
+import { verifyOidcIdToken } from './oidc.js'
+import { decodeJwt } from './jwt.js'
 
 const LWS = 'https://www.w3.org/ns/lws#'
 const CONTEXT = 'https://www.w3.org/ns/lws/v1'
 const LWS_JSON = 'application/lws+json'
+const LWS_CID = 'application/lws+cid'
+const LWS_QUERY = 'application/lws-query+json'
+// Requests that arrived as HTTP QUERY (RFC 10008). Fastify 4 has a fixed
+// method list, so the raw request is relabelled POST before routing and
+// remembered here; Fastify 5 routes QUERY natively (see the shim below).
+const queryRequests = new WeakSet()
+const CID_CONTEXT = 'https://www.w3.org/ns/cid/v1'
 const LINKSET_JSON = 'application/linkset+json'
 const MIME = {
   '.txt': 'text/plain', '.json': 'application/json', '.jsonld': 'application/ld+json',
@@ -34,6 +45,27 @@ const MIME = {
 }
 // Structural/protocol relations are never indexed as descriptive relations.
 const STRUCTURAL_RELS = new Set(['type', 'up', 'linkset', 'storagedescription', 'self', 'first', 'next', 'prev', 'last'])
+
+// update-resource.md / metadata.md (5 Oct 2026): JSON Patch is the baseline
+// every server MUST take; JSON Merge Patch stays as an advertised alternative.
+const JSON_PATCH = 'application/json-patch+json'
+const MERGE_PATCH = 'application/merge-patch+json'
+const PATCH_TYPES = [JSON_PATCH, MERGE_PATCH]
+const ACCEPT_PATCH = PATCH_TYPES.join(', ')
+
+// RFC 7396 merge: null deletes, objects recurse, anything else replaces.
+const mergePatch = (t, p) => {
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) return p
+  const out = (t && typeof t === 'object' && !Array.isArray(t)) ? { ...t } : {}
+  for (const [k, v] of Object.entries(p)) { if (v === null) delete out[k]; else out[k] = mergePatch(out[k], v) }
+  return out
+}
+// Throws PatchError (400 malformed, 409 refused) so callers answer uniformly.
+function applyPatch (doc, mediaType, body) {
+  if (mediaType === JSON_PATCH) return applyJsonPatch(doc, body)
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new PatchError(400, 'a JSON Merge Patch document is an object')
+  return mergePatch(doc, body)
+}
 
 const problem = (reply, status, title, detail) =>
   reply.code(status).type('application/problem+json')
@@ -67,6 +99,22 @@ export async function activate (api) {
   const notifier = new Notifier(priv, log)
   await notifier.init()
 
+  // Embedded authorization server (Authorization.html). Its issuer is the
+  // plugin's own URI (origin + prefix), so RFC 8414 puts its metadata at
+  // /.well-known/lws-configuration<prefix> — a root path, claimed through
+  // api.reservePath below. Tokens are short-lived by default (draft: ≤ 300 s);
+  // LWS_AS_TOKEN_LIFETIME raises that for long test sessions.
+  const as = await new AuthorizationServer({
+    dir: priv,
+    lifetime: config.tokenLifetime || parseInt(process.env.LWS_AS_TOKEN_LIFETIME, 10) || 300,
+    keyJwk: config.signingKey || process.env.LWS_AS_KEY_JWK || undefined,
+    log,
+  }).init()
+  // Pre-baseline behaviour (CONFORMANCE.md C12): also accept a did:key / CID
+  // credential presented directly as the Bearer token. On by default for
+  // existing clients; LWS_ACCEPT_CREDENTIALS=0 makes the storage strict.
+  const acceptCredentials = config.acceptCredentials !== false && process.env.LWS_ACCEPT_CREDENTIALS !== '0'
+
   // type index: urlPath -> { types: [], rels: { relName: [targets] } }
   const typeIndexFile = path.join(priv, 'typeindex.json')
   let typeIndex = {}
@@ -85,7 +133,44 @@ export async function activate (api) {
 
   const baseUrl = (req) => config.baseUrl || `${req.protocol}://${req.headers.host}`
   const href = (req, urlPath) => baseUrl(req) + prefix + urlPath
+  // The canonical storage URI is the root container's URI (Discovery.html:
+  // the storage description is a CID document whose id is that URI, and the
+  // StorageRoot service points at the root container — here, the same URI).
   const storageId = (req) => href(req, '/')
+  const storageLink = (req) => `<${storageId(req)}>; rel="${LWS}storage"`
+  // The authorization server's issuer identifier: the plugin's own URI.
+  const issuerOf = (req) => baseUrl(req) + prefix
+  const requestPath = (req) => { try { return new URL(req.url, 'http://x').pathname } catch { return prefix + '/' } }
+  const methodOf = (req) => queryRequests.has(req.raw) ? 'QUERY' : req.method
+
+  // Types a resource declares in its content (lws10-index: "Link headers,
+  // server-intrinsic classes, or content"). Deliberately shallow — the
+  // subject's own `a` / `@type` in Turtle and JSON(-LD), absolute IRIs only —
+  // so indexing stays cheap and never parses untrusted bodies deeply.
+  function bodyTypes (mediaType, body) {
+    const text = Buffer.isBuffer(body) ? body.toString() : typeof body === 'string' ? body : body ? JSON.stringify(body) : ''
+    if (!text || text.length > 1_000_000) return []
+    const out = new Set()
+    if (mediaType === 'text/turtle' || mediaType === 'text/n3') {
+      // the object list after `<> a` — IRIs only, up to the first non-IRI token
+      const m = /<>\s+(?:a|rdf:type|<http:\/\/www\.w3\.org\/1999\/02\/22-rdf-syntax-ns#type>)\s+((?:<[^>\s]+>\s*(?:,\s*)?)+)/.exec(text)
+      if (m) for (const t of m[1].matchAll(/<([^>\s]+)>/g)) if (isAbsoluteUri(t[1])) out.add(t[1])
+    } else if (/^application\/(ld\+)?json$|\+json$/.test(mediaType || '')) {
+      let doc; try { doc = JSON.parse(text) } catch { return [] }
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) {
+        for (const t of [].concat(doc['@type'] ?? doc.type ?? [])) if (typeof t === 'string' && isAbsoluteUri(t)) out.add(t)
+      }
+    }
+    return [...out]
+  }
+  // Discovery.html: a request for the storage URI returns the description as
+  // application/lws+cid "unless content negotiation requires a different
+  // format" — so no Accept, */*, or an explicit lws+cid gets the description;
+  // a container media type gets the root container.
+  const wantsDescription = (req) => {
+    const a = req.headers.accept
+    return !a || /^\s*\*\/\*\s*(;[^,]*)?$/.test(a) || a.includes(LWS_CID)
+  }
 
   function resolvePath (urlPath) {
     const rel = decodeURIComponent(urlPath).replace(/^\/+/, '')
@@ -139,7 +224,7 @@ export async function activate (api) {
     const links = [
       `<${href(req, '/-/meta' + (urlPath || '/'))}>; rel="linkset"; type="${LINKSET_JSON}"`,
       `<${LWS}${isContainer ? 'Container' : 'DataResource'}>; rel="type"`,
-      `<${href(req, '/-/description')}>; rel="${LWS}storageDescription"`,
+      storageLink(req),
     ]
     const up = parentOf(urlPath)
     if (up !== null) links.push(`<${href(req, up)}>; rel="up"`)
@@ -182,7 +267,7 @@ export async function activate (api) {
         : {
             type: 'DataResource',
             id: prefix + urlPath + d.name,
-            mediaType: MIME[path.extname(d.name)] || 'application/octet-stream',
+            format: formatOf(urlPath + d.name, d.name),
             size: st.size,
             modified: st.mtime.toISOString(),
           })
@@ -193,8 +278,13 @@ export async function activate (api) {
   // --- type index (lws10-searchindex) ----------------------------------------
 
   // Record types/relations declared via Link headers at write time.
-  function recordLinks (urlPath, linkHeader, isContainer) {
+  // `format` is the Content-Type the client sent on create/update: a data
+  // resource serves the bytes it was given under the media type it was
+  // given, whatever its name looks like. The extension map is only the
+  // fallback for files that arrived some other way.
+  function recordLinks (urlPath, linkHeader, isContainer, format, contentTypes = []) {
     const entry = { types: [LWS + (isContainer ? 'Container' : 'DataResource')], rels: {} }
+    for (const t of contentTypes) if (!entry.types.includes(t)) entry.types.push(t)
     for (const { href: target, rel } of parseLinks(linkHeader)) {
       if (rel === 'type') {
         if (!entry.types.includes(target)) entry.types.push(target)
@@ -202,9 +292,21 @@ export async function activate (api) {
         (entry.rels[rel] = entry.rels[rel] || []).push(target)
       }
     }
+    const fmt = format || typeIndex[urlPath]?.format
+    if (fmt) entry.format = fmt
     typeIndex[urlPath] = entry
     saveTypeIndex().catch(() => {})
   }
+  function setFormat (urlPath, format) {
+    if (!format) return
+    const entry = typeIndex[urlPath] || { types: [LWS + 'DataResource'], rels: {} }
+    entry.format = format
+    typeIndex[urlPath] = entry
+    saveTypeIndex().catch(() => {})
+  }
+  const mediaTypeOf = (req) => (req.headers['content-type'] || '').split(';')[0].trim() || undefined
+  const formatOf = (urlPath, name) =>
+    typeIndex[urlPath]?.format || MIME[path.extname(name)] || 'application/octet-stream'
   function unrecord (urlPath) {
     for (const k of Object.keys(typeIndex)) {
       if (k === urlPath || k.startsWith(urlPath.endsWith('/') ? urlPath : urlPath + '/')) delete typeIndex[k]
@@ -263,18 +365,53 @@ export async function activate (api) {
   const writers = Array.isArray(config.writers) && config.writers.length ? config.writers
     : (process.env.LWS_WRITERS || '').split(',').map((s) => s.trim()).filter(Boolean)
 
+  // Authorization.html: a 401 carries a Bearer challenge the client discovers
+  // the authorization server from. resource_metadata (RFC 9728, the 14 Oct
+  // draft) names the protected resource metadata document for *this* URI;
+  // as_uri / realm are the earlier draft's parameters, kept for clients and
+  // harnesses that still read them.
   function challenge (reply, req) {
+    const rm = `${baseUrl(req)}/.well-known/oauth-protected-resource${requestPath(req)}`
     reply.header('www-authenticate',
-      `Bearer as_uri="${baseUrl(req)}", realm="${storageId(req)}", error="invalid_token"`)
+      `Bearer resource_metadata="${rm}", as_uri="${issuerOf(req)}", realm="${storageId(req)}", error="invalid_token"`)
+    // Discovery.html: the storage link is on every GET/HEAD response for a
+    // storage resource, a 401 included — a client with no credentials still
+    // has to find the storage (and from it the authorization server).
+    if (!reply.getHeader('link')) reply.header('link', storageLink(req))
+  }
+
+  // Subject-token validation for the token endpoint: a self-issued did:key
+  // or CID JWT whose audience is this authorization server. Returns
+  // { subject, client } or null. (A self-issued credential's client is its
+  // subject: sub = iss = client_id.)
+  async function verifySubject (token, tokenType, audience) {
+    const d = decodeJwt(token)
+    if (!d || ![].concat(d.claims.aud ?? []).includes(audience)) return null
+    const type = normalizeTokenType(tokenType)
+    // An ID Token (lws10-authn-openid): the subject's document names the
+    // OP, whose discovered key signed it; the client is the authorized party.
+    if (type === TOKEN_TYPE_ID_TOKEN) return verifyOidcIdToken(token, { audience, allowLoopback: allowLoopbackCid })
+    if (type !== TOKEN_TYPE_JWT) return null
+    const subject = verifySelfIssuedJwt(token) || await verifyCidJwt(token, { allowLoopback: allowLoopbackCid })
+    return subject ? { subject, client: subject } : null
   }
 
   async function agentOf (req) {
     const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1]
     if (bearer && bearer.split('.').length === 3) {
-      const did = verifySelfIssuedJwt(bearer)
-      if (did) return did
-      const cid = await verifyCidJwt(bearer, { allowLoopback: allowLoopbackCid })
-      if (cid) return cid
+      // An access token from our authorization server (typ at+jwt) is
+      // validated as Authorization.html says and never falls through: a bad
+      // one is a bad one, not an attempt at a direct credential.
+      const d = decodeJwt(bearer)
+      if (d && /^(application\/)?at\+jwt$/i.test(d.header?.typ || '')) {
+        return as.verify(bearer, { issuer: issuerOf(req), audience: storageId(req) })?.sub ?? null
+      }
+      if (acceptCredentials) {
+        const did = verifySelfIssuedJwt(bearer)
+        if (did) return did
+        const cid = await verifyCidJwt(bearer, { allowLoopback: allowLoopbackCid })
+        if (cid) return cid
+      }
     }
     return api.auth.getAgent(req)
   }
@@ -289,6 +426,30 @@ export async function activate (api) {
     }
   }
   const grants = () => Object.values(access.grant)
+
+  // lws-access-requests.html: type, storage and access are REQUIRED on a
+  // grant (type and access on a request); each policy needs type, action
+  // and assignee, and a target, if present, is an object. A document that
+  // fails this grants nothing, so it is refused rather than stored.
+  function validateAccessDocument (kind, doc) {
+    const want = kind === 'request' ? 'AccessRequest' : 'AccessGrant'
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return 'the document must be a JSON object'
+    const types = [].concat(doc.type ?? [])
+    if (!types.some((t) => t === want || t === LWS + want)) return `type must include ${want}`
+    if (kind === 'grant' && (typeof doc.storage !== 'string' || !isAbsoluteUri(doc.storage))) return 'storage is required and must be a URI'
+    if (doc.inbox !== undefined && (typeof doc.inbox !== 'string' || !isAbsoluteUri(doc.inbox))) return 'inbox must be a URI'
+    if (!Array.isArray(doc.access) || doc.access.length === 0) return 'access must be a non-empty array of policies'
+    for (const p of doc.access) {
+      if (!p || typeof p !== 'object' || Array.isArray(p)) return 'each policy must be an object'
+      if (![].concat(p.type ?? []).some((t) => t === 'AccessPolicy' || t === LWS + 'AccessPolicy')) return 'policy type must include AccessPolicy'
+      const actions = [].concat(p.action ?? [])
+      if (!actions.length || !actions.every((a) => typeof a === 'string')) return 'policy action is required'
+      if (![].concat(p.assignee ?? []).length) return 'policy assignee is required'
+      if (p.target !== undefined && (typeof p.target !== 'object' || p.target === null || Array.isArray(p.target))) return 'policy target must be an object'
+      if (p.constraint !== undefined && !Array.isArray(p.constraint)) return 'policy constraint must be an array'
+    }
+    return null
+  }
 
   // Central authorization. httpMethod → ODRL action. Returns the agent id on
   // success (or 'anonymous'), or null after writing the error response.
@@ -321,40 +482,85 @@ export async function activate (api) {
     if (publicRead) return true
     const agent = await agentOf(req)
     if (!agent) return false
+    if (writers.includes(agent)) return true // the controller sees everything, as in authorize()
     return evalGrants(grants(), { agent, action: 'read', resourceUri, resourceType: resourceType || [], client: agent, purpose: req.headers['x-lws-purpose'] || null })
   }
 
   // --- notifications helpers ---------------------------------------------------
 
+  // Delivery-time check: does the subscriber still have read access to the
+  // changed resource? Anonymous subscribers see what the public sees.
+  const subscriberMayRead = (resourceUri, resourceType) => async (sub) => {
+    if (publicRead) return true
+    const agent = sub.subscriber && sub.subscriber !== 'anonymous' ? sub.subscriber : null
+    if (agent && writers.includes(agent)) return true
+    return evalGrants(grants(), { agent, action: 'read', resourceUri, resourceType: resourceType || [], client: agent, purpose: null })
+  }
   const emit = (req, type, urlPath, isContainer, extra = {}) =>
     notifier.emit(storageId(req), {
       type: [type],
       object: { id: href(req, urlPath), type: [isContainer ? 'Container' : 'DataResource'] },
       ...extra,
-    })
+    }, subscriberMayRead(href(req, urlPath), [LWS + (isContainer ? 'Container' : 'DataResource'), ...(typeIndex[urlPath]?.types || [])]))
 
   // --- service routes under /-/ -------------------------------------------------
 
+  // Storage description (Discovery.html, 5 Oct 2026 draft): a CID-1.0
+  // document — @context starts with cid/v1 then lws/v1, id is the storage
+  // URI, type Storage, and the service set MUST contain a StorageRoot. Served
+  // as application/lws+cid at the storage URI itself (the root container,
+  // via conneg in the main route) and, as a stable alias, at /-/description.
+  function storageDescription (req, reply) {
+    const id = storageId(req)
+    const frag = notifier.descriptionFragment(id, href(req, '/-/subscriptions'))
+    reply.type(LWS_CID).header('link', storageLink(req))
+    // Serialized by hand: fastify only JSON-serializes objects for content
+    // types that contain "json", and lws+cid doesn't.
+    return JSON.stringify({
+      '@context': [CID_CONTEXT, CONTEXT],
+      id,
+      type: 'Storage',
+      verificationMethod: frag.verificationMethod,
+      authentication: frag.authentication,
+      service: [
+        { type: 'StorageRoot', serviceEndpoint: id },
+        ...frag.service,
+        { type: 'TypeIndexService', serviceEndpoint: href(req, '/-/types/index') },
+        { type: 'TypeSearchService', serviceEndpoint: href(req, '/-/types/search') },
+        { type: 'AccessRequestService', serviceEndpoint: href(req, '/-/access/requests'), conformsTo: [LWS + 'AccessProfile'] },
+        { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
+      ],
+    })
+  }
+
   async function serviceRoutes (req, reply, urlPath) {
-    // storage description (Discovery.html + service advertising)
-    if (urlPath === '/-/description') {
-      const id = storageId(req)
-      const frag = notifier.descriptionFragment(id, href(req, '/-/subscriptions'))
-      reply.type(negotiate(req)).header('link', `<${href(req, '/-/description')}>; rel="${LWS}storageDescription"`)
-      return {
-        '@context': CONTEXT,
-        id,
-        type: 'Storage',
-        verificationMethod: frag.verificationMethod,
-        authentication: frag.authentication,
-        service: [
-          { type: 'StorageDescription', serviceEndpoint: href(req, '/-/description') },
-          ...frag.service,
-          { type: 'TypeIndexService', serviceEndpoint: href(req, '/-/types/index') },
-          { type: 'TypeSearchService', serviceEndpoint: href(req, '/-/types/search') },
-          { type: 'AccessRequestService', serviceEndpoint: href(req, '/-/access/requests'), conformsTo: [LWS + 'AccessProfile'] },
-          { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
-        ],
+    if (urlPath === '/-/description') return storageDescription(req, reply)
+
+    // --- authorization server: token endpoint + JWKS (Authorization.html) ---
+    if (urlPath === '/-/jwks') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') { reply.header('allow', 'GET, HEAD'); return problem(reply, 405, 'Method Not Allowed') }
+      reply.type('application/json').header('cache-control', 'public, max-age=300')
+      return req.method === 'HEAD' ? reply.send() : as.jwks()
+    }
+    if (urlPath === '/-/token') {
+      if (req.method !== 'POST') { reply.header('allow', 'POST'); return problem(reply, 405, 'Method Not Allowed') }
+      reply.type('application/json').header('cache-control', 'no-store').header('pragma', 'no-cache')
+      try {
+        if (mediaTypeOf(req) !== 'application/x-www-form-urlencoded') {
+          throw new OAuthError('invalid_request', 'token requests are application/x-www-form-urlencoded')
+        }
+        const params = new URLSearchParams(Buffer.isBuffer(req.body) ? req.body.toString() : String(req.body ?? ''))
+        return await as.exchange(params, {
+          issuer: issuerOf(req),
+          // One storage per plugin instance: the root container's URI, with
+          // or without its trailing slash.
+          isKnownStorage: (r) => r === storageId(req) || r === storageId(req).replace(/\/$/, ''),
+          verifySubject,
+        })
+      } catch (e) {
+        if (!(e instanceof OAuthError)) throw e
+        reply.code(400)
+        return { error: e.error, error_description: e.message }
       }
     }
 
@@ -366,42 +572,97 @@ export async function activate (api) {
       let st; try { st = await fs.stat(abs) } catch { return problem(reply, 404, 'Not Found') }
       const isC = st.isDirectory()
       const anchor = href(req, target === '/' ? '/' : target + (isC && !target.endsWith('/') ? '/' : ''))
+      // Server-managed relations are derived from the resource on every
+      // read and never stored; a patch that touches them is ignored rather
+      // than refused (metadata.md lets servers "restrict modifications to
+      // specific links … to maintain system integrity").
+      const MANAGED = ['anchor', 'type', 'up', 'linkset', 'format', 'mediaType', 'size', 'modified', 'items']
+      const render = async () => {
+        const user = await userLinks(target)
+        const entry = { anchor, type: [{ href: LWS + (isC ? 'Container' : 'DataResource') }] }
+        const up = parentOf(target)
+        if (up !== null) entry.up = [{ href: href(req, up) }]
+        for (const [rel, hrefs] of Object.entries(user)) entry[rel] = [].concat(hrefs).map((h) => ({ href: h }))
+        return { linkset: [entry] }
+      }
+      const linksetEtag = (d) => `"${createHash('sha1').update(JSON.stringify(d)).digest('hex').slice(0, 16)}"`
+      const doc = await render()
+      const etag = linksetEtag(doc)
+      const ALLOW = 'GET, HEAD, PATCH, OPTIONS' // no PUT: metadata.md makes it optional, and we say so
+      if (req.method === 'OPTIONS') {
+        reply.header('allow', ALLOW).header('accept-patch', ACCEPT_PATCH).code(204); return reply.send()
+      }
       if (req.method === 'PATCH') {
-        if ((req.headers['content-type'] || '').split(';')[0] !== 'application/merge-patch+json') {
-          return problem(reply, 415, 'Unsupported Media Type', 'use application/merge-patch+json')
+        const ct = mediaTypeOf(req)
+        if (!PATCH_TYPES.includes(ct)) {
+          reply.header('accept-patch', ACCEPT_PATCH)
+          return problem(reply, 415, 'Unsupported Media Type', `use ${ACCEPT_PATCH}`)
         }
         if (!await authorizeWrite(req, reply, target)) return
-        const cur = await userLinks(target)
-        for (const [k, v] of Object.entries(req.body || {})) {
-          if (['linkset', 'type', 'mediaType', 'size', 'modified', 'up', 'items'].includes(k)) {
-            return problem(reply, 409, 'Conflict', `link relation '${k}' is server-managed`)
-          }
-          if (v === null) delete cur[k]; else cur[k] = v
+        const ifMatch = req.headers['if-match']
+        if (ifMatch && ifMatch !== etag && ifMatch !== '*') {
+          return problem(reply, 412, 'Precondition Failed', 'ETag mismatch')
+        }
+        // The patch is applied to the linkset document as the client sees it
+        // (RFC 9264 shape), then the user-managed relations are read back out
+        // of the first link context — so a JSON Patch can add one link and
+        // leave the rest alone, while a merge patch replaces the array.
+        let next
+        try { next = applyPatch(doc, ct, req.body) } catch (e) {
+          if (!(e instanceof PatchError)) throw e
+          return problem(reply, e.status, e.status === 400 ? 'Bad Request' : 'Conflict', e.message)
+        }
+        const entry = Array.isArray(next?.linkset) ? next.linkset[0] : null
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return problem(reply, 409, 'Conflict', 'the patch does not leave a linkset document behind')
+        }
+        const cur = {}
+        for (const [rel, targets] of Object.entries(entry)) {
+          if (MANAGED.includes(rel)) continue
+          const hrefs = [].concat(targets ?? []).map((t) => typeof t === 'string' ? t : t?.href).filter((h) => typeof h === 'string')
+          if (hrefs.length) cur[rel] = hrefs
         }
         await fs.writeFile(metaFile(target), JSON.stringify(cur))
+        // User-managed relations are searchable too (lws10-index: relation
+        // targets come from "Link headers, server-intrinsic state, or parsed
+        // content" — a linkset is that state).
+        const ix = typeIndex[target] || { types: [LWS + (isC ? 'Container' : 'DataResource')], rels: {} }
+        ix.rels = ix.rels || {}
+        for (const r of ix.linksetRels || []) delete ix.rels[r] // relations the previous linkset set
+        Object.assign(ix.rels, cur)
+        ix.linksetRels = Object.keys(cur)
+        typeIndex[target] = ix
+        saveTypeIndex().catch(() => {})
         emit(req, 'Update', target, isC)
-        reply.code(204); return reply.send()
+        reply.code(204).header('etag', linksetEtag(await render())); return reply.send()
       }
-      const user = await userLinks(target)
-      const entry = { anchor, type: [{ href: LWS + (isC ? 'Container' : 'DataResource') }] }
-      const up = parentOf(target)
-      if (up !== null) entry.up = [{ href: href(req, up) }]
-      for (const [rel, hrefs] of Object.entries(user)) entry[rel] = [].concat(hrefs).map((h) => ({ href: h }))
-      reply.type(LINKSET_JSON).header('allow', 'GET, HEAD, PATCH')
-        .header('accept-patch', 'application/merge-patch+json')
-      return { linkset: [entry] }
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        reply.header('allow', ALLOW)
+        return problem(reply, 405, 'Method Not Allowed', 'a linkset takes GET, HEAD and PATCH')
+      }
+      reply.type(LINKSET_JSON).header('allow', ALLOW).header('accept-patch', ACCEPT_PATCH)
+        .header('etag', etag).header('link', storageLink(req))
+      if (req.method === 'HEAD') return reply.send()
+      return doc
     }
 
     // notification subscriptions (lws10-notifications)
     if (urlPath === '/-/subscriptions' || urlPath === '/-/subscriptions/') {
       if (req.method === 'POST') {
-        const agent = await authorizeWrite(req, reply); if (!agent) return
+        // Any authenticated agent may subscribe — to topics it can read
+        // (lws10-notifications: "MUST reject if the subscriber lacks read
+        // access to all topics"; CONFORMANCE.md C13).
+        const agent = await agentOf(req) || (anonWrites || publicRead ? 'anonymous' : null)
+        if (!agent) { challenge(reply, req); return problem(reply, 401, 'Unauthorized', 'authentication required') }
         const b = req.body || {}
         if (b.type !== 'WebhookSubscription') return problem(reply, 400, 'Bad Request', 'unsupported subscription type')
         if (!Array.isArray(b.topic) || !b.topic.length) return problem(reply, 400, 'Bad Request', 'topic array required')
-        if (typeof b.inbox !== 'string') return problem(reply, 400, 'Bad Request', 'inbox required')
-        // subscription authorization: reads are public in v1, so read access
-        // to all topics holds; enforce topic shape only (CONFORMANCE.md C13)
+        if (typeof b.inbox !== 'string' || !isAbsoluteUri(b.inbox)) return problem(reply, 400, 'Bad Request', 'inbox (a URI) required')
+        for (const t of b.topic) {
+          if (typeof t !== 'string' || !t.startsWith(storageId(req))) return problem(reply, 400, 'Bad Request', `topic is not in this storage: ${t}`)
+          const tPath = '/' + t.slice(storageId(req).length)
+          if (!await canRead(req, t, typeIndex[tPath]?.types)) return problem(reply, 403, 'Forbidden', `no read access to topic ${t}`)
+        }
         const sub = await notifier.create({ topic: b.topic, inbox: b.inbox, expires: b.expires, subscriber: agent })
         const subUrl = href(req, '/-/subscriptions/' + sub.id)
         reply.code(200).type(LWS_JSON).header('location', subUrl)
@@ -427,44 +688,81 @@ export async function activate (api) {
     // type index + search (lws10-searchindex). Authorization filtering
     // (searchindex §Security): only types/URIs the client may read, counts
     // over the client-specific view. Public-read = everything visible.
+    // Both services answer per client (authorization-filtered), so their
+    // responses must never be shared by a cache (lws10-index §Security).
     if (urlPath === '/-/types/index') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') { reply.header('allow', 'GET, HEAD'); return problem(reply, 405, 'Method Not Allowed') }
       const visible = await visibleEntries(req)
       const types = [...new Set(visible.flatMap((e) => e.types))].sort()
       const paged = paginate(reply, req, '/-/types/index', types.map((t) => ({ id: t })))
-      reply.type(LWS_JSON)
+      reply.type(LWS_JSON).header('cache-control', 'private').header('vary', 'Accept')
+      if (req.method === 'HEAD') return reply.send()
       return { '@context': CONTEXT, type: 'TypeIndex', totalItems: paged.total, items: paged.items }
     }
+    // lws10-index: the Type Search Service takes the filter in the body of an
+    // HTTP QUERY (RFC 10008) as application/lws-query+json — a plain JSON
+    // object (no @context) in conjunctive normal form. A GET with the same
+    // filter in the query string is kept as a non-standard convenience.
     if (urlPath === '/-/types/search') {
+      const method = methodOf(req)
+      const SEARCH_ALLOW = 'QUERY, GET, HEAD, OPTIONS'
+      if (method === 'OPTIONS') {
+        reply.header('allow', SEARCH_ALLOW).header('accept-query', LWS_QUERY).code(204); return reply.send()
+      }
+      if (method !== 'QUERY' && method !== 'GET' && method !== 'HEAD') {
+        reply.header('allow', SEARCH_ALLOW).header('accept-query', LWS_QUERY)
+        return problem(reply, 405, 'Method Not Allowed', 'search with QUERY')
+      }
+      const accept = req.headers.accept
+      if (accept && !/\*\/\*|application\/\*|application\/lws\+json|application\/ld\+json|application\/json/i.test(accept)) {
+        return problem(reply, 406, 'Not Acceptable', `results are ${LWS_JSON}`)
+      }
       const filters = {}
-      if (req.method === 'POST') {
-        const ct = (req.headers['content-type'] || '').split(';')[0]
-        if (ct && ct !== LWS_JSON) return problem(reply, 415, 'Unsupported Media Type', 'use application/lws+json')
-        const b = req.body
-        if (!b || typeof b !== 'object') return problem(reply, 400, 'Bad Request', 'malformed lws+json body')
-        for (const [k, v] of Object.entries(b)) {
-          if (k === '@context') continue
-          // each element must be a string or an array of strings
-          if (!Array.isArray(v) && typeof v !== 'string') return problem(reply, 400, 'Bad Request', `filter '${k}' must be a string or array`)
-          if (Array.isArray(v) && v.some((g) => !(typeof g === 'string' || (Array.isArray(g) && g.every((x) => typeof x === 'string'))))) {
-            return problem(reply, 400, 'Bad Request', `filter '${k}' elements must be strings or arrays of strings`)
-          }
-          filters[k] = parseGroups(v)
+      if (method === 'QUERY') {
+        const ct = mediaTypeOf(req)
+        if (!ct) return problem(reply, 400, 'Bad Request', 'QUERY needs a Content-Type naming the query format')
+        if (ct !== LWS_QUERY) {
+          reply.header('accept-query', LWS_QUERY)
+          return problem(reply, 415, 'Unsupported Media Type', `query format not supported; use ${LWS_QUERY}`)
         }
+        let b
+        try { b = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString() : String(req.body ?? '')) } catch { b = undefined }
+        if (!b || typeof b !== 'object' || Array.isArray(b)) return problem(reply, 400, 'Bad Request', 'a filter document is a JSON object')
+        for (const [k, v] of Object.entries(b)) {
+          if (k.startsWith('@')) continue // JSON-LD keywords are ignored, not constraints
+          if (!Array.isArray(v)) return problem(reply, 400, 'Bad Request', `filter '${k}' must be an array`)
+          for (const g of v) {
+            if (typeof g === 'string') continue
+            if (!Array.isArray(g) || g.length === 0 || !g.every((x) => typeof x === 'string')) {
+              return problem(reply, 400, 'Bad Request', `filter '${k}': each element is an IRI or a non-empty array of IRIs`)
+            }
+          }
+          if (v.length) filters[k] = parseGroups(v)
+        }
+      } else if (typeof req.query?.q === 'string') {
+        // A page of an earlier QUERY: the filter rides in the opaque page
+        // URI (lws10-index: page URIs are opaque, the filter is in the body
+        // and so cannot be re-sent on a GET). Unrecognisable → 404.
+        try { Object.assign(filters, JSON.parse(Buffer.from(req.query.q, 'base64url').toString())) } catch { return problem(reply, 404, 'Not Found', 'unknown page') }
       } else {
         for (const [k, v] of Object.entries(req.query || {})) {
           if (k === 'page') continue
           filters[k] = parseGroups(v)
         }
       }
-      // every filter value MUST be a syntactically valid absolute URI
+      // every filter value MUST be an absolute IRI
       for (const groups of Object.values(filters)) {
         for (const g of groups) for (const val of g) {
-          if (!isAbsoluteUri(val)) return problem(reply, 400, 'Bad Request', `not an absolute URI: ${val}`)
+          if (!isAbsoluteUri(val)) return problem(reply, 400, 'Bad Request', `not an absolute IRI: ${val}`)
         }
       }
       const matches = (await visibleEntries(req, searchIndex(filters)))
-      const paged = paginate(reply, req, '/-/types/search', matches)
-      reply.type(LWS_JSON)
+      const pageToken = Object.keys(filters).length ? '&q=' + Buffer.from(JSON.stringify(filters)).toString('base64url') : ''
+      const paged = paginate(reply, req, '/-/types/search', matches, pageToken)
+      // Same conneg as a container listing: lws+json by default, ld+json /
+      // json on request (lws-media-type.md); the body is identical.
+      reply.type(negotiate(req)).header('cache-control', 'private').header('vary', 'Accept')
+      if (method === 'HEAD') return reply.send()
       return { '@context': CONTEXT, type: 'ContainerPage', totalItems: paged.total, items: paged.items }
     }
 
@@ -473,19 +771,36 @@ export async function activate (api) {
       const base = `/-/access/${kind}s`
       if (urlPath === base || urlPath === base + '/') {
         if (req.method === 'POST') {
-          // requests: any authenticated agent; grants: storage controller
-          // (v1: the write gate stands in for the controller check)
-          const agent = await authorizeWrite(req, reply); if (!agent) return
+          // Requests: any authenticated agent may ask (that is the point of
+          // the service). Grants: the storage controller — the write gate.
+          let agent
+          if (kind === 'request') {
+            agent = await agentOf(req) || (anonWrites ? 'anonymous' : null)
+            if (!agent) { challenge(reply, req); return problem(reply, 401, 'Unauthorized', 'authentication required') }
+          } else {
+            agent = await authorizeWrite(req, reply); if (!agent) return
+          }
+          const invalid = validateAccessDocument(kind, req.body)
+          if (invalid) return problem(reply, 400, 'Bad Request', invalid)
           const id = randomUUID()
           const obj = { ...(req.body || {}), id: href(req, `${base}/${id}`), type: kind === 'request' ? 'AccessRequest' : 'AccessGrant', issued: new Date().toISOString(), creator: agent }
           access[kind][id] = obj
           await saveAccess(kind)
+          // "When an inbox property is present on an access request or
+          // access grant, the server … " announces it there: a signed
+          // Notification whose activity creates the document.
+          if (typeof obj.inbox === 'string') {
+            notifier.notifyInbox(obj.inbox, storageId(req), { type: ['Create'], object: { id: obj.id, type: [obj.type] } })
+          }
           reply.code(201).header('location', obj.id).type(LWS_JSON)
           return { '@context': CONTEXT, ...obj }
         }
-        const items = Object.keys(access[kind]).map((id) => ({ type: 'DataResource', id: prefix + `${base}/${id}`, mediaType: LWS_JSON }))
+        const items = Object.keys(access[kind]).map((id) => ({ type: 'DataResource', id: prefix + `${base}/${id}`, format: LWS_JSON }))
         const paged = paginate(reply, req, base, items)
-        reply.type(LWS_JSON)
+        // The endpoint is an LWS container (lws-access-requests.html), so it
+        // carries the container type and the storage link like any other.
+        const pageLinks = reply.getHeader('link')
+        reply.type(LWS_JSON).header('link', [`<${LWS}Container>; rel="type"`, storageLink(req), pageLinks].filter(Boolean).join(', '))
         return { '@context': CONTEXT, id: prefix + base, type: 'Container', totalItems: paged.total, items: paged.items }
       }
       if (urlPath.startsWith(base + '/')) {
@@ -520,9 +835,17 @@ export async function activate (api) {
       case 'GET':
       case 'HEAD': {
         if (!st) return problem(reply, 404, 'Not Found')
+        // The storage description is public: clients discover the
+        // authorization server from it before they hold any credential, and
+        // notification receivers resolve the signing key through it.
+        if (urlPath === '/' && wantsDescription(req)) {
+          reply.header('vary', 'Accept')
+          const desc = storageDescription(req, reply)
+          return req.method === 'HEAD' ? reply.send() : desc
+        }
         if (!publicRead) {
           const rt = [st.isDirectory() ? LWS + 'Container' : LWS + 'DataResource', ...(typeIndex[urlPath]?.types || [])]
-          if (!await authorize(req, reply, urlPath, { resourceType: rt })) return
+          if (!await authorize(req, reply, urlPath, { resourceType: rt, mediaType: st.isDirectory() ? LWS_JSON : formatOf(urlPath, abs) })) return
         }
         if (st.isDirectory()) {
           const cPath = urlPath.endsWith('/') ? urlPath : urlPath + '/'
@@ -537,9 +860,16 @@ export async function activate (api) {
         }
         const etag = etagOf(st)
         if (req.headers['if-none-match'] === etag) { reply.code(304); return reply.send() }
+        // Date validators alongside the ETag (RFC 9110 §13.1.3/§13.1.4):
+        // Last-Modified at one-second precision, so compare at that precision.
+        const mtimeSec = Math.floor(st.mtimeMs / 1000)
+        const since = (h) => { const t = Date.parse(req.headers[h] || ''); return isNaN(t) ? null : Math.floor(t / 1000) }
+        const ims = since('if-modified-since'); const ius = since('if-unmodified-since')
+        if (ius !== null && mtimeSec > ius) return problem(reply, 412, 'Precondition Failed', 'modified since the given date')
+        if (ims !== null && !req.headers['if-none-match'] && mtimeSec <= ims) { reply.code(304); return reply.send() }
         lwsHeaders(reply, req, urlPath, false)
-        reply.header('etag', etag).header('accept-ranges', 'bytes')
-          .type(MIME[path.extname(abs)] || 'application/octet-stream')
+        reply.header('etag', etag).header('last-modified', st.mtime.toUTCString()).header('accept-ranges', 'bytes')
+          .type(formatOf(urlPath, abs))
         const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '')
         if (range && (range[1] || range[2])) {
           const start = range[1] ? parseInt(range[1], 10) : st.size - parseInt(range[2], 10)
@@ -557,7 +887,10 @@ export async function activate (api) {
 
       case 'POST': { // create in container (Operations/create-resource.md)
         if (!st) return problem(reply, 404, 'Not Found', 'target container does not exist')
-        if (!st.isDirectory()) return problem(reply, 405, 'Method Not Allowed', 'POST targets a container')
+        if (!st.isDirectory()) {
+          reply.header('allow', 'GET, HEAD, PUT, PATCH, DELETE, OPTIONS')
+          return problem(reply, 405, 'Method Not Allowed', 'POST targets a container')
+        }
         if (!await authorizeWrite(req, reply, urlPath)) return
         const wantsContainer = parseLinks(req.headers.link).some((l) => l.rel === 'type' && l.href === LWS + 'Container')
         let name = (req.headers.slug || '').replace(/[^\w.\- ]/g, '').trim() ||
@@ -575,10 +908,14 @@ export async function activate (api) {
         if (wantsContainer) await fs.mkdir(childAbs)
         else await fs.writeFile(childAbs, req.body ?? '')
         const cst = await fs.stat(childAbs)
-        recordLinks(childPath, req.headers.link, wantsContainer)
+        recordLinks(childPath, req.headers.link, wantsContainer, wantsContainer ? undefined : (mediaTypeOf(req) || 'application/octet-stream'),
+          wantsContainer ? [] : bodyTypes(mediaTypeOf(req), req.body))
         emit(req, 'Create', childPath, wantsContainer, { target: href(req, base) })
         lwsHeaders(reply, req, childPath, wantsContainer)
-        reply.code(201).header('location', prefix + childPath)
+        // Absolute: a relative Location is legal (RFC 9110 §10.2.2) but
+        // every other URI this face emits is absolute, and harnesses that
+        // feed Location straight back as a URL don't all resolve it.
+        reply.code(201).header('location', href(req, childPath))
           .header('etag', wantsContainer ? await containerEtag(childAbs) : etagOf(cst))
         return reply.send()
       }
@@ -596,21 +933,23 @@ export async function activate (api) {
           return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
         await fs.writeFile(abs, req.body ?? '')
-        if (req.headers.link) recordLinks(urlPath, req.headers.link, false)
+        const putTypes = bodyTypes(mediaTypeOf(req), req.body)
+        if (req.headers.link || putTypes.length) recordLinks(urlPath, req.headers.link, false, mediaTypeOf(req), putTypes)
+        else setFormat(urlPath, mediaTypeOf(req))
         emit(req, 'Update', urlPath, false)
         reply.code(204).header('etag', etagOf(await fs.stat(abs)))
         return reply.send()
       }
 
-      case 'PATCH': { // partial content update — merge-patch for JSON resources
+      case 'PATCH': { // partial content update of JSON resources (update-resource.md)
         if (!st) return problem(reply, 404, 'Not Found')
         if (st.isDirectory()) return problem(reply, 405, 'Method Not Allowed')
         if (!await authorizeWrite(req, reply, urlPath)) return
-        const ct = (req.headers['content-type'] || '').split(';')[0]
-        const targetType = MIME[path.extname(abs)] || 'application/octet-stream'
-        if (ct !== 'application/merge-patch+json' || !['application/json', 'application/ld+json'].includes(targetType)) {
-          reply.header('accept-patch', 'application/merge-patch+json')
-          return problem(reply, 415, 'Unsupported Media Type', 'merge-patch on JSON resources only')
+        const ct = mediaTypeOf(req)
+        const targetType = formatOf(urlPath, abs)
+        if (!PATCH_TYPES.includes(ct) || !/^application\/([a-z.+-]+\+)?json$/.test(targetType)) {
+          reply.header('accept-patch', ACCEPT_PATCH)
+          return problem(reply, 415, 'Unsupported Media Type', 'JSON Patch or JSON Merge Patch, on JSON resources only')
         }
         const ifMatch = req.headers['if-match']
         if (ifMatch && ifMatch !== etagOf(st) && ifMatch !== '*') {
@@ -618,13 +957,12 @@ export async function activate (api) {
         }
         let doc
         try { doc = JSON.parse(await fs.readFile(abs, 'utf8')) } catch { return problem(reply, 409, 'Conflict', 'stored content is not valid JSON') }
-        const merge = (t, p) => {
-          if (p === null || typeof p !== 'object' || Array.isArray(p)) return p
-          const out = (t && typeof t === 'object' && !Array.isArray(t)) ? { ...t } : {}
-          for (const [k, v] of Object.entries(p)) { if (v === null) delete out[k]; else out[k] = merge(out[k], v) }
-          return out
+        let next
+        try { next = applyPatch(doc, ct, req.body) } catch (e) {
+          if (!(e instanceof PatchError)) throw e
+          return problem(reply, e.status, e.status === 400 ? 'Bad Request' : 'Conflict', e.message)
         }
-        await fs.writeFile(abs, JSON.stringify(merge(doc, req.body)))
+        await fs.writeFile(abs, JSON.stringify(next))
         emit(req, 'Update', urlPath, false)
         reply.code(204).header('etag', etagOf(await fs.stat(abs)))
         return reply.send()
@@ -663,13 +1001,55 @@ export async function activate (api) {
 
   await fastify.register(async (scope) => {
     scope.removeAllContentTypeParsers()
-    scope.addContentTypeParser('application/merge-patch+json', { parseAs: 'string' }, (r, body, done) => {
-      try { done(null, JSON.parse(body)) } catch (e) { done(e) }
-    })
+    for (const t of PATCH_TYPES) {
+      scope.addContentTypeParser(t, { parseAs: 'string' }, (r, body, done) => {
+        try { done(null, JSON.parse(body)) } catch (e) { done(e) }
+      })
+    }
     scope.addContentTypeParser(LWS_JSON, { parseAs: 'string' }, (r, body, done) => {
       try { done(null, JSON.parse(body)) } catch (e) { done(e) }
     })
     scope.addContentTypeParser('*', { parseAs: 'buffer' }, (r, body, done) => done(null, body))
+
+    // HTTP QUERY (RFC 10008) for the Type Search Service. Fastify 5 can be
+    // taught a method; Fastify 4 (what jss runs today) has a fixed list and
+    // 404s anything else before routing. There the raw request is relabelled
+    // POST on the way in and remembered, and methodOf() reports the truth —
+    // a host-API gap (CONFORMANCE.md C15) that goes away with Fastify 5.
+    if (typeof scope.addHttpMethod === 'function') {
+      try { scope.addHttpMethod('QUERY', { hasBody: true }) } catch { /* already added */ }
+      scope.route({ method: 'QUERY', url: prefix + '/*', handler: (req, reply) => { queryRequests.add(req.raw); return route((r) => '/' + (r.params['*'] || ''))(req, reply) } })
+    } else if (scope.server?.prependListener) {
+      scope.server.prependListener('request', (raw) => {
+        if (raw.method === 'QUERY') { queryRequests.add(raw); raw.method = 'POST' }
+      })
+    }
+
+    // Root-level discovery documents the authorization framework pins to
+    // well-known paths (RFC 8414 metadata, RFC 9728 protected resource
+    // metadata). Outside the mount, so claimed through api.reservePath (jss
+    // #602) — read-only, WAC-exempt — when the host offers it; without it
+    // the routes still register but core's dotfile/WAC handling decides.
+    const wellKnownAs = '/.well-known/lws-configuration' + prefix
+    const wellKnownPrm = '/.well-known/oauth-protected-resource' + prefix
+    if (typeof api.reservePath === 'function') {
+      api.reservePath(wellKnownAs)
+      api.reservePath(wellKnownPrm)
+    }
+    const asMetadata = (req, reply) => {
+      reply.type('application/json').header('cache-control', 'public, max-age=300')
+      return as.metadata(issuerOf(req), { tokenEndpoint: href(req, '/-/token'), jwksUri: href(req, '/-/jwks') })
+    }
+    scope.get(wellKnownAs, asMetadata)
+    scope.get(wellKnownAs + '/', asMetadata)
+    const prm = (req, reply) => {
+      reply.type('application/json')
+      return { resource: href(req, '/' + (req.params['*'] || '')), authorization_servers: [issuerOf(req)] }
+    }
+    scope.get(wellKnownPrm, prm)
+    scope.get(wellKnownPrm + '/', prm)
+    scope.get(wellKnownPrm + '/*', prm)
+
     scope.all(prefix + '/*', route((req) => '/' + (req.params['*'] || '')))
     scope.all(prefix + '/', route(() => '/'))
     scope.all(prefix, (req, reply) => reply.redirect(prefix + '/', 308))

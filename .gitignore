@@ -4,3 +4,6 @@ data/
 .env
 .DS_Store
 package-lock.json
+
+# Touchstone checkout and reports (scripts/touchstone.sh)
+.touchstone/
