@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, delimiter } from 'path'
 import chalk from 'chalk'
@@ -57,6 +58,56 @@ if (!options.auth) jssArgs.push('--public')
 
 console.log(chalk.cyan('LWSD') + chalk.dim(' — Linked Web Storage Daemon'))
 console.log(chalk.dim(`storage: http://${options.host}:${options.port}${options.prefix}/`))
+
+// The storage lives under the prefix; the host serves `/` from the data
+// directory's index.html (its own Solid welcome page by default). Seed a
+// page that says what is running here and where the storage is — once,
+// and never over a page the operator has edited.
+const indexFile = join(options.root, 'index.html')
+if (!existsSync(indexFile)) {
+  const storage = `http://${options.host}:${options.port}${options.prefix}/`
+  const asMeta = `http://${options.host}:${options.port}/.well-known/lws-configuration${options.prefix}`
+  mkdirSync(options.root, { recursive: true })
+  writeFileSync(indexFile, `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lwsd — Linked Web Storage</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-weight: 600; margin-bottom: .25rem; }
+  code, pre { font-family: ui-monospace, monospace; background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  pre { padding: .75rem; overflow-x: auto; }
+  dt { font-weight: 600; margin-top: .75rem; }
+  footer { margin-top: 3rem; font-size: .85rem; color: #666; }
+  a { color: #0a58ca; }
+</style>
+</head>
+<body>
+<h1>lwsd</h1>
+<p>A <a href="https://linkedwebstorage.com/">W3C Linked Web Storage</a> server is running here.</p>
+<dl>
+  <dt>Storage</dt>
+  <dd><a href="${storage}"><code>${storage}</code></a> — the storage URI; its description as <code>application/lws+cid</code>, the root container as <code>application/lws+json</code>.</dd>
+  <dt>Authorization server</dt>
+  <dd><a href="${asMeta}"><code>${asMeta}</code></a> — RFC 8414 metadata: token exchange, JWKS.</dd>
+</dl>
+<p>Try it:</p>
+<pre>curl -X POST ${storage} -H 'Slug: notes' \\
+     -H 'Link: &lt;https://www.w3.org/ns/lws#Container&gt;; rel="type"' -i
+
+curl ${storage}notes/ -H 'Accept: application/lws+json'</pre>
+<footer>
+  <a href="https://github.com/linkedwebstorage/lwsd">lwsd on GitHub</a> ·
+  <a href="https://github.com/linkedwebstorage/lwsd/blob/gh-pages/CONFORMANCE.md">conformance</a> ·
+  hosted by <a href="https://github.com/JavaScriptSolidServer/JavaScriptSolidServer">JSS</a>.
+  Customise this page: edit <code>index.html</code> in the data directory.
+</footer>
+</body>
+</html>
+`)
+}
 
 const jss = spawn('jss', jssArgs, {
   stdio: 'inherit',
