@@ -180,7 +180,8 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   `addHttpMethod('QUERY', { hasBody: true })`. Until jss moves, the plugin prepends a listener on
   the raw server that relabels a `QUERY` request as `POST` and remembers it in a `WeakSet`; the
   handler reports the real method. Narrow and reversible, but it is the plugin reaching under the
-  host. Worth a jss issue: Fastify 5, or a host-level `QUERY` registration.
+  host. Raised as jss #628 and closed WONTFIX — a host-level method registration is a can of
+  worms for one endpoint — so the shim is the permanent answer here.
 - **C14 (S)** — the CID authn suite requires the verifier to **dereference** the subject URI over
   the network to fetch the controlled identifier document. That's a mandatory outbound fetch from
   a *storage server* — an SSRF surface the spec doesn't discuss. This plugin guards it (http/https
