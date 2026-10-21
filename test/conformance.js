@@ -73,11 +73,15 @@ r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'appli
 check('R9d', 'Linkset: stale If-Match → 412', r.status === 412, `status ${r.status}`)
 r = await fetch(linksetUrl, { method: 'PUT', headers: { 'content-type': 'application/linkset+json' }, body: '{"linkset":[]}' })
 check('R9e', 'Linkset: PUT not advertised → 405 + Allow', r.status === 405 && !!r.headers.get('allow'), `status ${r.status}`)
-r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'application/json-patch+json', 'if-match': lsEtag }, body: '[{"op":"add","path":"/linkset/0/license","value":[{"href":"https://creativecommons.org/licenses/by/4.0/"}]},{"op":"add","path":"/linkset/0/up","value":[{"href":"https://linkset.invalid/forged/"}]}]' })
+r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'application/json-patch+json', 'if-match': lsEtag }, body: '[{"op":"add","path":"/linkset/0/license","value":[{"href":"https://creativecommons.org/licenses/by/4.0/"}]}]' })
 check('R9f', 'Linkset: JSON Patch adds a user link: 204 + new ETag', r.status === 204 && !!r.headers.get('etag') && r.headers.get('etag') !== lsEtag, `status ${r.status}`)
+r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'application/json-patch+json' }, body: '[{"op":"add","path":"/linkset/0/up","value":[{"href":"https://linkset.invalid/forged/"}]}]' })
+check('R9f2', 'Linkset: up pointed outside the storage → 409 (9.6: only an existing container)', r.status === 409, `status ${r.status}`)
+r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'application/json-patch+json' }, body: '[{"op":"remove","path":"/linkset/0/up"}]' })
+check('R9f3', 'Linkset: removing the up link → 409', r.status === 409, `status ${r.status}`)
 r = await fetch(linksetUrl, { headers: { accept: 'application/linkset+json' } })
 body = await r.json()
-check('R9g', 'Linkset: license kept, forged up ignored, up still the real parent', body.linkset[0].license?.[0]?.href === 'https://creativecommons.org/licenses/by/4.0/' && body.linkset[0].up?.length === 1 && body.linkset[0].up[0].href === notes, JSON.stringify(body.linkset[0]))
+check('R9g', 'Linkset: license kept, up still the real parent', body.linkset[0].license?.[0]?.href === 'https://creativecommons.org/licenses/by/4.0/' && body.linkset[0].up?.length === 1 && body.linkset[0].up[0].href === notes, JSON.stringify(body.linkset[0]))
 r = await fetch(linksetUrl, { method: 'PATCH', headers: { 'content-type': 'application/json-patch+json' }, body: '[{"op":"replace","path":"/linkset","value":"not a linkset"}]' })
 check('R9h', 'Linkset: patch that breaks the document → 409', r.status === 409, `status ${r.status}`)
 
@@ -168,9 +172,18 @@ check('SI9f', 'TypeSearch: OPTIONS advertises QUERY in Allow and lws-query+json 
 r = await fetch(notes, { method: 'POST', headers: { slug: 'me.ttl', 'content-type': 'text/turtle' }, body: '<> a <https://schema.org/Person>, <https://schema.org/Thing> .' })
 r = await query({ type: ['https://schema.org/Person', 'https://schema.org/Thing'] }); body = await r.json()
 check('SI9g', 'Types derived from Turtle content (<> a …)', body.items.some((i) => i.id.endsWith('/notes/me.ttl')), JSON.stringify(body.items))
-// ld+json;profile equivalence (lws-media-type.md)
+// The LWS profile (core §LWS profile, 19 Oct 2026): an RDF media type asked for with
+// profile="…/lws/v1" is answered in that media type, profile in the Content-Type, same RDF.
 r = await fetch(notes, { headers: { accept: 'application/ld+json; profile="https://www.w3.org/ns/lws/v1"' } })
-check('SI10', 'ld+json;profile treated as lws+json', (r.headers.get('content-type') || '').includes('application/lws+json'))
+const ldProfile = await r.json()
+check('SI10', 'ld+json in the LWS profile: Content-Type names the profile, same document as lws+json', /application\/ld\+json;\s*profile="https:\/\/www\.w3\.org\/ns\/lws\/v1"/.test(r.headers.get('content-type') || '') && ldProfile.type === 'Container' && Array.isArray(ldProfile.items), r.headers.get('content-type'))
+r = await fetch(notes, { headers: { accept: 'text/turtle; profile="https://www.w3.org/ns/lws/v1"' } })
+const ttl = await r.text()
+check('SI10b', 'Turtle in the LWS profile: lws:Container, lws:totalItems, lws:items, members typed with dcterms:format / schema:size / dcterms:modified',
+  /text\/turtle;\s*profile="https:\/\/www\.w3\.org\/ns\/lws\/v1"/.test(r.headers.get('content-type') || '') &&
+  ttl.includes(`<${notes}> a <https://www.w3.org/ns/lws#Container>`) && ttl.includes('<https://www.w3.org/ns/lws#totalItems> ' + ldProfile.totalItems) &&
+  ttl.includes(`<${item}> a <https://www.w3.org/ns/lws#DataResource>`) && ttl.includes('<http://purl.org/dc/terms/format> "text/plain"') && ttl.includes('^^<http://www.w3.org/2001/XMLSchema#long>') && ttl.includes('^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
+  r.headers.get('content-type'))
 
 // ---- authorization surface (issue #9) --------------------------------------
 r = await fetch(BASE + '/-/access/requests', { method: 'POST', headers: { 'content-type': 'application/lws+json' }, body: JSON.stringify({ '@context': 'https://www.w3.org/ns/lws/v1', type: ['AccessRequest'], access: [{ type: ['AccessPolicy'], action: ['read'], assignee: 'https://bob.example/#me', target: { type: 'StorageResource', value: [BASE + '/notes/'] } }] }) })

@@ -9,22 +9,32 @@ Implementation: `lws/plugin.js` + helpers (`notify.js`, `access.js`, `cidauth.js
 
 ## Touchstone — conformant
 
-[Touchstone](https://github.com/ebremer/touchstone) `master` at `6a3206e` (205 tests), run by
-`scripts/touchstone.sh --auth` (Authentication, ReachableFixtures, HarnessIssuedTokens declared;
-public read off; alice the writer; page size 4), 14 Oct 2026:
+[Touchstone](https://github.com/ebremer/touchstone) `master` at `cd01608` (221 tests, re-baselined on
+the 19 Oct 2026 core WD and the 15 Oct authn suites), run by `scripts/touchstone.sh --auth`
+(Authentication, ReachableFixtures, HarnessIssuedTokens declared; public read off; alice the writer;
+page size 4), 21 Oct 2026:
 
-**197 passed, 0 failed, 0 cantTell, 8 inapplicable — conformant.** The inapplicable eight: three
-need `SamlTrust`, five are preconditions for optional behaviour (`Content-Location` on search
-results, a paginated-but-single-page listing, a first-page link on a one-page search,
-`Prefer: set-linkset` combined updates, container access that does not reach members). Erich Bremer's
-independent run of the same commit gives the same numbers: <https://ebremer.com/lws/conformance>. As an open target (`scripts/touchstone.sh`): 64 passed, 0
-failed, 139 inapplicable — conformant.
+**210 passed, 0 failed, 0 cantTell, 11 inapplicable — conformant.** The inapplicable eleven: three
+need `SamlTrust`; three test move choices this storage does not make (`move-keeps-identifier-content-and-links`
+wants `preservesIdentifier: true`, `move-container-refused-without-container-support` a storage that
+moves data resources only, `move-refused-without-capability` one with no capability); five are
+preconditions for optional behaviour (`Content-Location` on search results, a paginated-but-single-page
+listing, a first-page link on a one-page search, `Prefer: set-linkset` combined updates, container
+access that does not reach members). Reports: `reports/touchstone/2026-10-21-master-cd01608/`.
 
-## Batteries — `npm test` runs all six (134 checks)
+History: 14 Oct 2026, `6a3206e` (205 tests, 5 Oct drafts): 197 passed, 0 failed, 8 inapplicable —
+conformant, confirmed by Erich Bremer's independent run (<https://ebremer.com/lws/conformance>).
+19 Oct, his run of the re-baselined harness against the then head: 197 passed, 2 failed
+(`linkset-up-not-redirected`, `move-refused-without-capability` — a patch of the up link was ignored
+with 204 where the new draft requires a refusal or a move), 22 inapplicable. Both fixed by implementing
+§9.6 (below).
+
+## Batteries — `npm test` runs all seven (145 checks)
 
 | Battery | Checks | Server config | Covers |
 |---|---|---|---|
-| `conformance.js` | 67 | `LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5` | core, pagination, content PATCH, type index/search (+ strict 400/415 errors + ld+json profile), notifications with RFC 9421 signature *verification* |
+| `conformance.js` | 78 | `LWS_ANON_WRITES=1 LWS_PAGE_SIZE=5` | core, pagination, content PATCH, type index/search (+ strict 400/415 errors), the LWS profile in JSON-LD and Turtle, up-link refusals, notifications with RFC 9421 signature *verification* |
+| `move.js` | 15 | `LWS_ANON_WRITES=1` | §9.6 moving: capability, data-resource and container moves, 200 + Content-Location + 301 on the old identifiers, ETags of both containers, user links kept, refusals (missing / non-container / removed up, cycles, name collisions), one `Move` activity |
 | `auth.js` | 6 | `LWS_WRITERS=<did:key>` | 401 challenge + did:key self-issued JWT accept/reject |
 | `cid.js` | 3 | `LWS_WRITERS=<sub> LWS_CID_ALLOW_LOOPBACK=1` | CID self-issued JWT: dereference `sub` → controlled identifier doc → verify |
 | `grants.js` | 12 | `LWS_PUBLIC_READ=0 LWS_WRITERS=<admin>` | ODRL access-grant engine: read-gating, foaf:Agent public grants, action scoping, dateTime constraints, authz-filtered search |
@@ -73,10 +83,10 @@ Not implemented: the **OpenID** and **SAML** authn suites, and the full OAuth **
 authorization flow — all three require an external authorization server / identity provider,
 outside a storage server's scope (C11/C12). lws10-vocab publishing (a doc-gen concern).
 
-## Draft drift since July (`7832003` → 5 Oct 2026 WD and later)
+## Draft drift since July (`7832003` → 19 Oct 2026 WD)
 
 Tracked against [Touchstone](https://github.com/ebremer/touchstone), which baselines on the
-5 Oct core WD. Absorbed items are ticked; the rest are the upgrade list
+19 Oct core WD and the 15 Oct authn suites. Absorbed items are ticked; the rest are the upgrade list
 (JavaScriptSolidServer/JavaScriptSolidServer#621).
 
 - [x] **Storage discovery** (#183, #234, 21 Aug) — `rel="storageDescription"` → `rel="https://www.w3.org/ns/lws#storage"`
@@ -129,6 +139,25 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
 - [x] **secp256k1 / ES256K did:keys** (RFC 8812): a Nostr or Bitcoin key is an LWS identity as-is —
   `did:key` with the `0xe701` codec, credentials signed ECDSA on the same curve. `mint-token.js --nostr`
   takes hex or nsec. The did:key of a BIP-340 x-only pubkey is deterministic (even y).
+- [x] **Moving resources** (#237, 19 Oct; core §9.6): the up link in a linkset is patchable; a changed
+  target is a move — the destination must be an existing container of this storage, a container may
+  not go into itself or a descendant, the agent needs delete on the resource (the whole subtree for a
+  container, judged before anything moves) and create in the destination; a patch that removes the up
+  link or leaves several is refused (409). One `fs.rename` moves the subtree atomically; linkset
+  sidecars and type-index entries follow. The description advertises
+  `MoveResource { appliesTo: [DataResource, Container], preservesIdentifier: false }` — see C16.
+  One `Move` activity (`origin`, `target`, `object` as it is after the move), heard by subscriptions to
+  the container left as well as the one joined.
+- [x] **Discovery via RFC 9728 only** (#256, 19 Oct): the 401 carries the `lws#storage` link and
+  `resource_metadata` (still with `as_uri` / `realm` for older clients); `aud` is checked to *include*
+  the storage. The harness's exactly-one-audience test is retired; the AS still issues one.
+- [x] **Content negotiation narrowed; the LWS profile** (#253, 19 Oct): only `application/lws+json` is
+  owed; `application/ld+json` / `application/json` are still served as the same document; asked for
+  with `profile="https://www.w3.org/ns/lws/v1"`, `application/ld+json` and `text/turtle` are served
+  in that media type with the profile in the `Content-Type` and the same RDF (the Turtle is written
+  from the listing under the WG's `lws/v1` context: `lws:items`, `lws:totalItems`, members typed,
+  `dcterms:format`, `schema:size` as `xsd:long`, `dcterms:modified` as `xsd:dateTime`; a contained
+  container is only typed, as the context scopes the other three to data resources).
 - [ ] Notification envelopes: Activity Streams terms → dcterms + LWS (#219); core notification
   model folded into lws10-core (#185). (The harness accepts the AS2-shaped envelope today.)
 - [ ] Slug dropped from spec text (#224) — keep accepting it, stop relying on it in tests.
@@ -186,6 +215,15 @@ Tracked against [Touchstone](https://github.com/ebremer/touchstone), which basel
   handler reports the real method. Narrow and reversible, but it is the plugin reaching under the
   host. Raised as jss #628 and closed WONTFIX — a host-level method registration is a can of
   worms for one endpoint — so the shim is the permanent answer here.
+- **C16 (S)** — **a path-addressed storage cannot preserve identifiers on a move.** jss, like every
+  file-system server, derives a resource's URI from its container path, so moving `/a/x.txt` into
+  `/b/` makes it `/b/x.txt`. §9.6 allows this (`preservesIdentifier: false`; `200` with the new
+  linkset and `Content-Location`; `301` from the old identifiers, which this plugin keeps in a small
+  moved-map that follows later moves of the resource or of a container above it), but it means the
+  draft's headline benefit — "every link pointing at that identifier" stays valid — needs an
+  opaque-identifier storage, which neither jss nor most of the servers on the tracker are. Touchstone
+  has no test for the non-preserving response shape yet (`move-new-identifier-response` is listed as
+  untested), so that half is covered by `test/move.js` only.
 - **C14 (S)** — the CID authn suite requires the verifier to **dereference** the subject URI over
   the network to fetch the controlled identifier document. That's a mandatory outbound fetch from
   a *storage server* — an SSRF surface the spec doesn't discuss. This plugin guards it (http/https

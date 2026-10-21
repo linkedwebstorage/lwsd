@@ -45,6 +45,9 @@ async function battery (name, { port, env, script, args }) {
 console.log('=== lws10-core + searchindex + notifications (47/47) + strict errors ===')
 const r1 = await battery('features', { port: 5601, env: { LWS_ANON_WRITES: '1', LWS_PAGE_SIZE: '5' }, script: 'conformance.js' })
 
+console.log('\n=== lws10-core 9.6: moving resources (14/14) ===')
+const rM = await battery('move', { port: 5607, env: { LWS_ANON_WRITES: '1' }, script: 'move.js' })
+
 console.log('\n=== authn: did:key self-issued JWT (6/6) ===')
 const did = execFileSync('node', [join(here, 'auth.js'), '--emit-did']).toString()
 const r2 = await battery('did:key', { port: 5602, env: { LWS_WRITERS: did }, script: 'auth.js' })
@@ -70,6 +73,6 @@ try { rmSync(join(tmpdir(), 'lws-oidc-test-key.json'), { force: true }) } catch 
 const oidcSub = execFileSync('node', [join(here, 'oidc.js'), '--emit-sub', String(oidcPort)]).toString()
 const r6 = await battery('oidc', { port: 5606, env: { LWS_PUBLIC_READ: '0', LWS_WRITERS: oidcSub, LWS_CID_ALLOW_LOOPBACK: '1' }, script: 'oidc.js', args: [String(oidcPort)] })
 
-const all = [r1, r2, r3, r4, r5, r6]
+const all = [r1, rM, r2, r3, r4, r5, r6]
 console.log(`\n${'='.repeat(50)}\n${all.filter(Boolean).length}/${all.length} batteries passed`)
 process.exit(all.every(Boolean) ? 0 : 1)

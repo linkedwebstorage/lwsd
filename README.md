@@ -11,8 +11,8 @@ by mounting an LWS protocol face — [`lws/plugin.js`](lws/plugin.js) — on
 distribution in the same shape as [jspod](https://github.com/JavaScriptSolidServer/jspod):
 JSS provides the host (HTTP, auth chain, WAC), the plugin provides lws10-core semantics.
 
-**197 of 205 [Touchstone](https://github.com/ebremer/touchstone) tests pass (0 failed; see [Touchstone](#touchstone)). Own suite: 134 checks across 6 batteries** (`npm test`) over the current editors' drafts —
-core, searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
+**210 of 221 [Touchstone](https://github.com/ebremer/touchstone) tests pass (0 failed; see [Touchstone](#touchstone)). Own suite: 145 checks across 7 batteries** (`npm test`) over the 19 October 2026 drafts —
+core (moving resources included), searchindex, notifications, the ODRL access model, and the did:key + CID authn suites.
 See [CONFORMANCE.md](CONFORMANCE.md) for the full matrix and, more interestingly, the catalogue
 of spec conflicts and host-API gaps the implementation surfaced (C1–C14).
 
@@ -59,6 +59,16 @@ current configuration limitations.
   (merge-patch), container representations (`application/lws+json` + conneg incl. `ld+json;profile`),
   link-based pagination, linkset metadata resources (RFC 9264), storage description discovery,
   `Depth: infinity` recursive delete, Range requests, RFC 9457 errors, optional 507 quota.
+- **Moving resources** (core §9.6, 19 Oct 2026) — a JSON Patch on a linkset's `up` link moves a data
+  resource or a whole container between containers, atomically, with delete + create authorization,
+  cycle and bad-destination refusals (409), one `Move` activity, and a `MoveResource` capability in the
+  storage description. Identifiers here are paths, so a moved resource gets a new one
+  (`preservesIdentifier: false`): the response is `200` + the new linkset + `Content-Location`, and
+  the old identifiers answer `301`.
+- **The LWS profile** — a container asked for as `application/ld+json` or `text/turtle` with
+  `profile="https://www.w3.org/ns/lws/v1"` is answered in that media type, profile named in the
+  `Content-Type`, RDF-isomorphic to `application/lws+json` (the Turtle is written from the listing
+  under the WG's lws/v1 context).
 - **lws10-searchindex** — `TypeIndexService` + `TypeSearchService` with the full CNF filter
   (GET + POST), types derived from `Link` headers at write time, strict 400/415 errors, and
   authorization-filtered results.
@@ -106,7 +116,7 @@ browser asks once before a public page may reach `localhost`. Source: [`lws/todo
 ## Test suite
 
 ```bash
-# all four batteries (72 checks) on scratch ports:
+# all seven batteries (145 checks) on scratch ports:
 JSS_BIN=$(command -v jss) npm test
 ```
 
@@ -114,8 +124,8 @@ Individual batteries and their server configs are documented in [CONFORMANCE.md]
 
 ### Touchstone
 
-[Touchstone](https://github.com/ebremer/touchstone) is the W3C LWS conformance harness (101
-tests over the 5 Oct 2026 drafts). `scripts/touchstone.sh` starts lwsd as an open target and
+[Touchstone](https://github.com/ebremer/touchstone) is the W3C LWS conformance harness (221
+tests over the 19 Oct 2026 drafts). `scripts/touchstone.sh` starts lwsd as an open target and
 runs it against `/lws/` on a free port, with Docker if present or a JDK 21+ build of
 the CLI jar otherwise; reports land in `.touchstone/runs/`.
 
@@ -129,44 +139,49 @@ scripts/touchstone.sh --module core      # or auth, core/containers, one test id
 Exit 1 means a verdict was reached and it's non-conformant; exit 2 means the harness produced no
 verdict (misconfigured or unreachable).
 
-**197 of 205 Touchstone tests pass — 0 failed, 0 cantTell, 8 inapplicable (3 SAML, 5 optional
-preconditions). Conformant.** [Touchstone](https://github.com/ebremer/touchstone) `master` (`6a3206e`) is
-the W3C LWS conformance harness over the October 2026 drafts; 205 is its whole catalogue. 14 Oct 2026,
-per specification module:
+**210 of 221 Touchstone tests pass — 0 failed, 0 cantTell, 11 inapplicable (3 SAML, 8 preconditions
+for the other legal choice). Conformant.** [Touchstone](https://github.com/ebremer/touchstone) `master`
+(`cd01608`) is the W3C LWS conformance harness re-baselined on the 19 October 2026 drafts (core WD of
+19 Oct, authn suites of 15 Oct); 221 is its whole catalogue. 21 Oct 2026, per specification module:
 
 | Specification | Touchstone manifest | Passed | MUST | SHOULD | MAY |
 |---|---|---|---|---|---|
-| **LWS 1.0 Core** — storage discovery | `core/discovery` | **7 / 7** | 6 | 1 | – |
-| — containers | `core/containers` | **18 / 18** | 11 | 5 | 2 |
+| **LWS 1.0 Core** — storage discovery (RFC 9728 protected resource metadata) | `core/discovery` | **7 / 7** | 7 | – | – |
+| — containers (incl. the LWS profile in JSON-LD and Turtle) | `core/containers` | **19 / 19** | 13 | 4 | 2 |
 | — data resources (incl. JSON Patch, Range) | `core/data_resources` | **17 / 17** | 10 | 6 | 1 |
 | — conditional requests and entity tags | `core/conditional_requests` | **9 / 9** | 4 | 5 | – |
-| — linksets (RFC 9264 metadata) | `core/linksets` | **9 / 9** | 8 | 1 | – |
-| — pagination | `core/pagination` | **4 / 4** | 3 | 1 | – |
-| — storage server authorization | `core/storage_authorization` | **17 / 17** | 17 | – | – |
+| — linksets (RFC 9264 metadata) | `core/linksets` | **10 / 10** | 9 | 1 | – |
+| — moving resources between containers | `core/moving` | **9 / 12** | 12 | – | – |
+| — pagination | `core/pagination` | **4 / 5** | 4 | 1 | – |
+| — storage server authorization | `core/storage_authorization` | **19 / 19** | 19 | – | – |
 | — authorization server (RFC 8693 token exchange) | `core/authorization_server` | **9 / 9** | 7 | 2 | – |
 | — access requests and grants (ODRL) | `core/access_grants` | **17 / 17** | 13 | 2 | 2 |
-| — notifications | `core/notifications` | **14 / 14** | 13 | 1 | – |
+| — notifications | `core/notifications` | **14 / 15** | 14 | 1 | – |
 | **LWS 1.0 Notification Suite: Webhooks** (RFC 9421 signatures) | `notifications/webhook` | **11 / 11** | 8 | 1 | 2 |
-| **LWS Search and Type Index Services** (HTTP QUERY) | `index` | **37 / 40** | 28 | 5 | 4 |
+| **LWS Search and Type Index Services** (HTTP QUERY) | `index` | **37 / 40** | 30 | 6 | 4 |
 | **Authentication Suite: Self-signed Identity (CID)** — did:key and HTTPS subjects | `auth/cid` | **22 / 22** | 22 | – | – |
 | **Authentication Suite: OpenID Connect** | `auth/oidc` | **6 / 6** | 6 | – | – |
 | Authentication Suite: SAML 2.0 | `auth/saml` | not implemented | – | – | – |
-| **Total** | 15 manifests | **197 / 205** | 156 | 30 | 11 |
+| **Total** | 16 manifests | **210 / 221** | 181 | 29 | 11 |
 
-The eight that are not passes are inapplicable, not failures: three need SAML, five are preconditions
-for optional behaviour (`Content-Location` on search results, page links on a one-page listing or
-search, `Prefer: set-linkset` combined updates, container access that does not reach members). The
-full report — EARL, HTML, JUnit — is in
-[`reports/touchstone/2026-10-14-master-6a3206e/`](reports/touchstone/2026-10-14-master-6a3206e/)
-(and the earlier 196/203 run at `5c49679` beside it).
+The eleven that are not passes are inapplicable, not failures: three need SAML, three test the move
+choices this storage does not make (a storage that preserves identifiers, one that moves data resources
+only, one with no move capability), and five are preconditions for optional behaviour (`Content-Location`
+on search results, page links on a one-page listing or search, `Prefer: set-linkset` combined updates,
+container access that does not reach members). The full report — EARL, HTML, JUnit — is in
+[`reports/touchstone/2026-10-21-master-cd01608/`](reports/touchstone/2026-10-21-master-cd01608/)
+(the 14 Oct runs on the 5 Oct drafts, 197/205 and 196/203, are beside it).
 Run it yourself with `scripts/touchstone.sh --auth`; a fresh report lands in `.touchstone/runs/`.
 
 **Independently verified.** Erich Bremer, Touchstone's author, re-runs the harness against this
 repository's head on every harness update and publishes the results beside the other LWS servers:
-**<https://ebremer.com/lws/conformance>** (first entry 14 Oct 2026: 197 of 205, 0 failed, conformant).
-That page, not this README, is the current number.
+**<https://ebremer.com/lws/conformance>** (14 Oct 2026: 197 of 205, conformant; 19 Oct, on the
+re-baselined harness and before this repository followed the new drafts: 197 of 221 with two move
+refusals failing — fixed here, pending his re-run). That page, not this README, is the current number.
 
-Outside the harness's reach: notification envelopes still use the Activity Streams shape the
+Outside the harness's reach: the `200` + `Content-Location` + `301` behaviour of a storage that does
+not preserve identifiers on a move (the harness has no test for it yet; `test/move.js` covers it);
+notification envelopes still use the Activity Streams shape the
 harness accepts (the draft moved to dcterms, w3c/lws-protocol#219); `LWS_ACCEPT_CREDENTIALS`
 defaults to on, so a did:key / CID credential presented directly as a Bearer token still works
 (set it to `0` for token-exchange only); and the HTTP `QUERY` search reaches the plugin through a

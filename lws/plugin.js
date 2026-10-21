@@ -120,6 +120,24 @@ export async function activate (api) {
   let typeIndex = {}
   try { typeIndex = JSON.parse(await fs.readFile(typeIndexFile, 'utf8')) } catch { /* fresh */ }
   const saveTypeIndex = () => fs.writeFile(typeIndexFile, JSON.stringify(typeIndex))
+  // Where moved resources went (9.6 Moving resources): this storage derives
+  // identifiers from the containment hierarchy, so a move changes them, and
+  // the old identifiers answer 301 (the draft's SHOULD for such servers).
+  const movedFile = path.join(priv, 'moved.json')
+  let moved = {}
+  try { moved = JSON.parse(await fs.readFile(movedFile, 'utf8')) } catch { /* fresh */ }
+  const saveMoved = () => fs.writeFile(movedFile, JSON.stringify(moved))
+  // The current location of a path that no longer exists, following moves
+  // of the resource itself or of a container it was in; null if unknown.
+  function movedTo (urlPath) {
+    let cur = urlPath
+    for (let hops = 0; hops < 16; hops++) {
+      const k = Object.keys(moved).filter((k) => cur === k || (k.endsWith('/') && cur.startsWith(k))).sort((a, b) => b.length - a.length)[0]
+      if (!k) return hops ? cur : null
+      cur = moved[k] + cur.slice(k.length)
+    }
+    return cur
+  }
 
   // access grants/requests: id -> object
   const accessFile = (kind) => path.join(accessDir, kind + '.json')
@@ -233,9 +251,17 @@ export async function activate (api) {
 
   // lws-media-type.md: identical body, only Content-Type varies.
   // application/ld+json;profile="…lws/v1" is equivalent to application/lws+json.
+  // The LWS profile (19 Oct 2026 draft §LWS profile): an RDF media type asked
+  // for with profile="…/lws/v1" is answered in that media type, the profile
+  // named in the Content-Type, and RDF-isomorphic to application/lws+json.
+  // JSON-LD is the same document; Turtle is written by hand from the listing
+  // (containerTurtle), under the WG's lws/v1 context.
+  const PROFILE = 'https://www.w3.org/ns/lws/v1'
+  const inProfile = (req, type) => new RegExp(type.replace(/[+/]/g, '\\$&') + '\\s*;\\s*profile\\s*=\\s*"?' + PROFILE.replace(/[./]/g, '\\$&')).test(req.headers.accept || '')
+  const wantsTurtleProfile = (req) => inProfile(req, 'text/turtle')
   function negotiate (req) {
     const a = req.headers.accept || ''
-    if (/application\/ld\+json\s*;\s*profile\s*=\s*"?https:\/\/www\.w3\.org\/ns\/lws\/v1/.test(a)) return LWS_JSON
+    if (inProfile(req, 'application/ld+json')) return `application/ld+json; profile="${PROFILE}"`
     if (a.includes('application/ld+json')) return 'application/ld+json'
     if (a.includes('application/json') && !a.includes(LWS_JSON)) return 'application/json'
     return LWS_JSON
@@ -255,6 +281,20 @@ export async function activate (api) {
     const prior = reply.getHeader('link')
     reply.header('link', (prior ? prior + ', ' : '') + links.join(', '))
     return { items: items.slice((page - 1) * pageSize, page * pageSize), total }
+  }
+
+  function containerTurtle (req, cPath, total, items) {
+    const iri = (p) => `<${baseUrl(req) + p}>`
+    const out = [`${iri(prefix + cPath)} a <${LWS}Container> ;`, `  <${LWS}totalItems> ${total}${items.length ? ' ;' : ' .'}`]
+    if (items.length) out.push(`  <${LWS}items> ${items.map((i) => iri(i.id)).join(', ')} .`)
+    for (const i of items) {
+      if (i.type === 'Container') { out.push(`${iri(i.id)} a <${LWS}Container> .`); continue }
+      out.push(`${iri(i.id)} a <${LWS}DataResource> ;`,
+        `  <http://purl.org/dc/terms/format> ${JSON.stringify(i.format)} ;`,
+        `  <http://schema.org/size> "${i.size}"^^<http://www.w3.org/2001/XMLSchema#long> ;`,
+        `  <http://purl.org/dc/terms/modified> "${i.modified}"^^<http://www.w3.org/2001/XMLSchema#dateTime> .`)
+    }
+    return out.join('\n') + '\n'
   }
 
   async function containerItems (urlPath, abs) {
@@ -457,8 +497,8 @@ export async function activate (api) {
 
   // Central authorization. httpMethod → ODRL action. Returns the agent id on
   // success (or 'anonymous'), or null after writing the error response.
-  async function authorize (req, reply, urlPath, { resourceType, mediaType } = {}) {
-    const action = HTTP_TO_ACTION[req.method] || 'read'
+  async function authorize (req, reply, urlPath, { resourceType, mediaType, action: wanted } = {}) {
+    const action = wanted || HTTP_TO_ACTION[req.method] || 'read'
     const isRead = action === 'read'
     if (isRead && publicRead) return 'anonymous'
     if (!isRead && anonWrites) return 'anonymous'
@@ -474,10 +514,10 @@ export async function activate (api) {
     const ctx = accessCtx(req, agent, action, urlPath, resourceType, mediaType)
     // The writer allowlist represents trusted storage controllers (full access).
     // With no allowlist, any authenticated agent may write; reads are grant-gated.
-    const allowed = writers.includes(agent) || (!writers.length && !isRead) || evalGrants(grants(), ctx)
-    if (!allowed) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted to ${action}`); return null }
+    if (!permitted(agent, ctx)) { problem(reply, 403, 'Forbidden', `agent ${agent} not permitted to ${action}`); return null }
     return agent
   }
+  const permitted = (agent, ctx) => writers.includes(agent) || (!writers.length && ctx.action !== 'read') || evalGrants(grants(), ctx)
   // Back-compat shim for existing write call sites.
   const authorizeWrite = (req, reply, urlPath = '/') => authorize(req, reply, urlPath)
 
@@ -500,12 +540,12 @@ export async function activate (api) {
     if (agent && writers.includes(agent)) return true
     return evalGrants(grants(), { agent, action: 'read', resourceUri, resourceType: resourceType || [], client: agent, purpose: null })
   }
-  const emit = (req, type, urlPath, isContainer, extra = {}) =>
+  const emit = (req, type, urlPath, isContainer, extra = {}, alsoUris = []) =>
     notifier.emit(storageId(req), {
       type: [type],
       object: { id: href(req, urlPath), type: [isContainer ? 'Container' : 'DataResource'] },
       ...extra,
-    }, subscriberMayRead(href(req, urlPath), [LWS + (isContainer ? 'Container' : 'DataResource'), ...(typeIndex[urlPath]?.types || [])]))
+    }, subscriberMayRead(href(req, urlPath), [LWS + (isContainer ? 'Container' : 'DataResource'), ...(typeIndex[urlPath]?.types || [])]), alsoUris)
 
   // --- service routes under /-/ -------------------------------------------------
 
@@ -526,6 +566,10 @@ export async function activate (api) {
       type: 'Storage',
       verificationMethod: frag.verificationMethod,
       authentication: frag.authentication,
+      // 6.1.3 Storage Capabilities / 9.6: clients may move resources and
+      // containers by patching the up link. Identifiers here are paths, so a
+      // moved resource gets a new one (the old answers 301).
+      capability: [{ type: 'MoveResource', appliesTo: ['DataResource', 'Container'], preservesIdentifier: false }],
       service: [
         { type: 'StorageRoot', serviceEndpoint: id },
         ...frag.service,
@@ -535,6 +579,77 @@ export async function activate (api) {
         { type: 'AccessGrantService', serviceEndpoint: href(req, '/-/access/grants'), conformsTo: [LWS + 'AccessProfile'] },
       ],
     })
+  }
+
+  // 9.6 Moving resources between containers. `target` is the resource's
+  // path as the linkset named it, `userRels` the user-managed links the same
+  // patch leaves behind. Identifiers are paths here, so the resource gets a
+  // new one under the destination and the response is the 200 + linkset +
+  // Content-Location the draft asks of a server that does not preserve them.
+  async function moveResource (req, reply, target, isC, abs, destHref, userRels) {
+    const sid = storageId(req)
+    const self = isC && !target.endsWith('/') ? target + '/' : target
+    let dest = destHref === sid.replace(/\/$/, '') ? '/' : destHref.startsWith(sid) ? '/' + destHref.slice(sid.length) : null
+    if (dest === null || dest.startsWith('/-/')) return problem(reply, 409, 'Conflict', 'the destination must be a container of this storage')
+    if (!dest.endsWith('/')) dest += '/'
+    const destAbs = resolvePath(dest)
+    let dst = null; try { dst = destAbs && await fs.stat(destAbs) } catch { /* missing */ }
+    if (!dst || !dst.isDirectory()) return problem(reply, 409, 'Conflict', 'the destination is not an existing container')
+    if (isC && (dest === self || dest.startsWith(self))) {
+      return problem(reply, 409, 'Conflict', `${href(req, dest)} is ${dest === self ? '' : 'a descendant of '}${href(req, self)}`)
+    }
+    const name = path.posix.basename(self.replace(/\/$/, ''))
+    const next = dest + name + (isC ? '/' : '')
+    const nextAbs = resolvePath(next)
+    if (!nextAbs) return problem(reply, 400, 'Bad Request', 'invalid path')
+    try { await fs.stat(nextAbs); return problem(reply, 409, 'Conflict', 'the destination already holds a resource of that name') } catch { /* free */ }
+    // Authorization: delete on the resource — recursively for a container,
+    // judged for the whole subtree before anything moves — and create in the
+    // destination.
+    const typesOf = (p, c) => [LWS + (c ? 'Container' : 'DataResource'), ...(typeIndex[p]?.types || [])]
+    const agent = await authorize(req, reply, self, { action: 'delete', resourceType: typesOf(self, isC) })
+    if (!agent) return
+    if (isC && agent !== 'anonymous') {
+      const walk = async (dir, p) => {
+        for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+          const cp = p + e.name + (e.isDirectory() ? '/' : '')
+          if (!permitted(agent, accessCtx(req, agent, 'delete', cp, typesOf(cp, e.isDirectory())))) return cp
+          if (e.isDirectory()) { const d = await walk(path.join(dir, e.name), cp); if (d) return d }
+        }
+        return null
+      }
+      const denied = await walk(abs, self)
+      if (denied) return problem(reply, 403, 'Forbidden', `agent ${agent} not permitted to delete ${href(req, denied)}`)
+    }
+    if (!await authorize(req, reply, dest, { action: 'create', resourceType: typesOf(dest, true) })) return
+    // Apply: one rename moves the subtree atomically; the sidecars follow.
+    await fs.rename(abs, nextAbs)
+    const under = (k) => k === self || k === self.replace(/\/$/, '') || (isC && k.startsWith(self))
+    const rekey = (k) => next + k.slice(k === self.replace(/\/$/, '') ? k.length : self.length)
+    for (const f of await fs.readdir(metaDir)) {
+      if (!f.endsWith('.json')) continue
+      const k = decodeURIComponent(f.slice(0, -5))
+      if (under(k)) await fs.rename(path.join(metaDir, f), metaFile(rekey(k))).catch(() => {})
+    }
+    for (const k of Object.keys(typeIndex)) {
+      if (under(k)) { typeIndex[rekey(k)] = typeIndex[k]; delete typeIndex[k] }
+    }
+    if (userRels && Object.keys(userRels).length) await fs.writeFile(metaFile(next), JSON.stringify(userRels))
+    else await fs.rm(metaFile(next), { force: true })
+    moved[self] = next
+    for (const k of Object.keys(moved)) if (moved[k] === self || (isC && moved[k].startsWith(self))) moved[k] = next + moved[k].slice(self.length)
+    delete moved[next]
+    await Promise.all([saveTypeIndex(), saveMoved()]).catch(() => {})
+    const origin = href(req, parentOf(self))
+    emit(req, 'Move', next, isC, { origin, target: href(req, dest) }, [href(req, self)])
+    const entry = { anchor: href(req, next), type: [{ href: LWS + (isC ? 'Container' : 'DataResource') }], up: [{ href: href(req, dest) }] }
+    for (const [rel, hrefs] of Object.entries(userRels || {})) entry[rel] = hrefs.map((h) => ({ href: h }))
+    const doc = { linkset: [entry] }
+    reply.code(200).type(LINKSET_JSON)
+      .header('content-location', href(req, '/-/meta' + next))
+      .header('etag', `"${createHash('sha1').update(JSON.stringify(doc)).digest('hex').slice(0, 16)}"`)
+      .header('link', `<${href(req, dest)}>; rel="up", ${storageLink(req)}`)
+    return doc
   }
 
   async function serviceRoutes (req, reply, urlPath) {
@@ -578,7 +693,11 @@ export async function activate (api) {
       const target = urlPath.slice('/-/meta'.length) || '/'
       const abs = resolvePath(target)
       if (!abs) return problem(reply, 400, 'Bad Request', 'invalid path')
-      let st; try { st = await fs.stat(abs) } catch { return problem(reply, 404, 'Not Found') }
+      let st; try { st = await fs.stat(abs) } catch {
+        const now = movedTo(target)
+        if (now) { reply.code(301).header('location', href(req, '/-/meta' + now)); return reply.send() }
+        return problem(reply, 404, 'Not Found')
+      }
       const isC = st.isDirectory()
       const anchor = href(req, target === '/' ? '/' : target + (isC && !target.endsWith('/') ? '/' : ''))
       // Server-managed relations are derived from the resource on every
@@ -625,11 +744,23 @@ export async function activate (api) {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
           return problem(reply, 409, 'Conflict', 'the patch does not leave a linkset document behind')
         }
+        const hrefsOf = (targets) => [].concat(targets ?? []).map((t) => typeof t === 'string' ? t : t?.href).filter((h) => typeof h === 'string')
         const cur = {}
         for (const [rel, targets] of Object.entries(entry)) {
           if (MANAGED.includes(rel)) continue
-          const hrefs = [].concat(targets ?? []).map((t) => typeof t === 'string' ? t : t?.href).filter((h) => typeof h === 'string')
+          const hrefs = hrefsOf(targets)
           if (hrefs.length) cur[rel] = hrefs
+        }
+        // The up link (9.6 Moving resources between containers): a patch
+        // that changes it is a move; one that removes it, or leaves several,
+        // is refused — every non-root resource is reachable from the root.
+        const parent = parentOf(target)
+        if (parent !== null) {
+          const up = hrefsOf(entry.up)
+          if (up.length !== 1) {
+            return problem(reply, 409, 'Conflict', up.length ? 'a resource has exactly one up link' : 'a patch may not leave the resource without an up link')
+          }
+          if (up[0] !== href(req, parent)) return moveResource(req, reply, target, isC, abs, up[0], cur)
         }
         await fs.writeFile(metaFile(target), JSON.stringify(cur))
         // User-managed relations are searchable too (lws10-index: relation
@@ -843,7 +974,11 @@ export async function activate (api) {
     switch (req.method) {
       case 'GET':
       case 'HEAD': {
-        if (!st) return problem(reply, 404, 'Not Found')
+        if (!st) {
+          const now = movedTo(urlPath)
+          if (now) { reply.code(301).header('location', href(req, now)); return reply.send() }
+          return problem(reply, 404, 'Not Found')
+        }
         // The storage description is public: clients discover the
         // authorization server from it before they hold any credential, and
         // notification receivers resolve the signing key through it.
@@ -863,6 +998,10 @@ export async function activate (api) {
           lwsHeaders(reply, req, cPath, true)
           const all = await containerItems(cPath, abs)
           const paged = paginate(reply, req, cPath, all)
+          if (wantsTurtleProfile(req)) {
+            reply.header('etag', etag).header('vary', 'Accept').type(`text/turtle; profile="${PROFILE}"`)
+            return req.method === 'HEAD' ? reply.send() : containerTurtle(req, cPath, paged.total, paged.items)
+          }
           reply.header('etag', etag).header('vary', 'Accept').type(negotiate(req))
           if (req.method === 'HEAD') return reply.send()
           return { '@context': CONTEXT, id: prefix + cPath, type: 'Container', totalItems: paged.total, items: paged.items }

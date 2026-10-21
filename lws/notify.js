@@ -80,10 +80,12 @@ export class Notifier {
   // subscriber may still read the resource — `allow(sub, resourceUri)` is
   // asked at delivery time, so a revoked grant silences a subscription
   // without anyone having to delete it. Fire-and-forget.
-  emit (storageId, activity, allow = async () => true) {
+  // `alsoUris` are further identifiers the activity concerns — a Move's
+  // former identifier, so a subscription to the container it left hears it.
+  emit (storageId, activity, allow = async () => true, alsoUris = []) {
     const full = { id: randomUUID(), published: new Date().toISOString(), ...activity }
     for (const sub of Object.values(this.subs)) {
-      if (!this.matches(sub, full.object.id)) continue
+      if (![full.object.id, ...alsoUris].some((u) => this.matches(sub, u))) continue
       Promise.resolve(allow(sub, full.object.id))
         .then((ok) => ok && this.deliverWithRetry(sub, storageId, full))
         .catch((err) => this.log?.warn(`lws notify: delivery to ${sub.inbox} failed: ${err.message}`))
