@@ -1084,7 +1084,11 @@ export async function activate (api) {
         if (!wantsContainer && await overQuota((req.body || '').length)) {
           return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
-        if (wantsContainer) await fs.mkdir(childAbs)
+        if (wantsContainer) {
+          // Two creates of the same container at once (a client writing several
+          // documents into a new one): the loser gets a 409, not a 500.
+          try { await fs.mkdir(childAbs) } catch (e) { if (e.code === 'EEXIST') return problem(reply, 409, 'Conflict', 'container already exists'); throw e }
+        }
         else await fs.writeFile(childAbs, bodyBytes(req))
         const cst = await fs.stat(childAbs)
         recordLinks(childPath, req.headers.link, wantsContainer, wantsContainer ? undefined : (mediaTypeOf(req) || 'application/octet-stream'),
