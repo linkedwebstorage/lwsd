@@ -31,6 +31,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--prefix') options.prefix = args[++i]
   else if (a === '--no-auth') options.auth = false
   else if (a === '--mashlib-module') options.mashlibModule = args[++i]
+  else if (a === '--browser') options.browser = args[++i]
   else if (a === '--') { passthrough.push(...args.slice(i + 1)); break }
   else if (a === '--help') {
     console.log(chalk.cyan('\nLWSD — Linked Web Storage Daemon\n'))
@@ -40,7 +41,8 @@ for (let i = 0; i < args.length; i++) {
     console.log('  -r, --root <path>   Data directory (default: ./data)')
     console.log('  --prefix <path>     LWS storage prefix (default: /lws)')
     console.log('  --no-auth           Public server, anonymous writes (dev/testing)')
-    console.log('  --mashlib-module <url>  Serve an ES module data browser (e.g. solidos-nobuild) for browser navigations')
+    console.log('  --mashlib-module <url>  Serve an ES module data browser (e.g. solidos-nobuild) for the Solid pod')
+    console.log('  --browser <url>     Serve an ES module data browser (e.g. mashlib-lws boot.js) for the LWS storage')
     console.log('  -- <jss options>    Pass the rest to jss start (e.g. -- --idp --single-user)')
     console.log('\nResources:')
     console.log('  https://github.com/linkedwebstorage/lwsd')
@@ -123,6 +125,7 @@ const jss = spawn(jssCmd, jssArgv, {
   env: {
     ...process.env,
     ...(options.auth ? {} : { LWS_ANON_WRITES: '1' }),
+    ...(options.browser ? { LWS_BROWSER: options.browser } : {}),
     PATH: `${join(__dirname, 'node_modules', '.bin')}${delimiter}${process.env.PATH}`,
   },
 })

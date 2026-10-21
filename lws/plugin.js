@@ -259,6 +259,21 @@ export async function activate (api) {
   const PROFILE = 'https://www.w3.org/ns/lws/v1'
   const inProfile = (req, type) => new RegExp(type.replace(/[+/]/g, '\\$&') + '\\s*;\\s*profile\\s*=\\s*"?' + PROFILE.replace(/[./]/g, '\\$&')).test(req.headers.accept || '')
   const wantsTurtleProfile = (req) => inProfile(req, 'text/turtle')
+  // A browser navigating (not an app fetching): Sec-Fetch-Dest says so when sent;
+  // otherwise HTML preferred to RDF in Accept.
+  const wantsBrowser = (req) => {
+    const dest = req.headers['sec-fetch-dest']
+    if (dest) return dest === 'document'
+    const a = req.headers.accept || ''
+    const html = a.indexOf('text/html')
+    return html >= 0 && !['text/turtle', 'application/ld+json', LWS_JSON, 'application/json'].some((t) => a.indexOf(t) >= 0 && a.indexOf(t) < html)
+  }
+  const browserPage = (req) => `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="lws-storage" content="${href(req, '/')}">
+<title>LWS</title></head>
+<body><div id="mashlib"></div><script type="module" src="${browser}"></script></body></html>
+`
   function negotiate (req) {
     const a = req.headers.accept || ''
     if (inProfile(req, 'application/ld+json')) return `application/ld+json; profile="${PROFILE}"`
@@ -402,6 +417,9 @@ export async function activate (api) {
   // self-issued JWTs. Authorization = a static writer allowlist OR the ODRL
   // access-grant engine (lws-access-requests.html).
   const anonWrites = config.anonWrites === true || process.env.LWS_ANON_WRITES === '1'
+  // An ES-module data browser (e.g. mashlib-lws's boot.js), served for browser
+  // navigations to containers and non-HTML resources, like JSS's --mashlib-module.
+  const browser = config.browser || process.env.LWS_BROWSER || null
   const writers = Array.isArray(config.writers) && config.writers.length ? config.writers
     : (process.env.LWS_WRITERS || '').split(',').map((s) => s.trim()).filter(Boolean)
 
@@ -982,6 +1000,10 @@ export async function activate (api) {
         // The storage description is public: clients discover the
         // authorization server from it before they hold any credential, and
         // notification receivers resolve the signing key through it.
+        if (browser && wantsBrowser(req) && !(st.isFile() && formatOf(urlPath, abs) === 'text/html')) {
+          reply.header('vary', 'Accept').type('text/html')
+          return req.method === 'HEAD' ? reply.send() : browserPage(req)
+        }
         if (urlPath === '/' && wantsDescription(req)) {
           reply.header('vary', 'Accept')
           const desc = storageDescription(req, reply)

@@ -49,6 +49,7 @@ curl -X PUT http://localhost:3126/lws/notes/list.txt --data 'bread' -i
 | `--prefix <path>` | `/lws` | LWS storage root prefix |
 | `--no-auth` | off | Public server with anonymous writes (dev/testing) |
 | `--mashlib-module <url>` | off | Serve an ES-module data browser for browser navigations, e.g. [solidos-nobuild](https://github.com/JavaScriptSolidServer/solidos-nobuild) from inside the pod |
+| `--browser <url>` | off | Serve an ES-module data browser for browser navigations into the LWS storage, e.g. [mashlib-lws](https://github.com/linkedwebstorage/mashlib-lws)'s `boot.js` (env `LWS_BROWSER`). HTML resources are still served as themselves |
 | `-- <jss options>` | — | Everything after `--` goes to `jss start` as is (e.g. `-- --idp --single-user`) |
 
 ```bash
@@ -56,7 +57,15 @@ curl -X PUT http://localhost:3126/lws/notes/list.txt --data 'bread' -i
 lwsd --port 3126 --mashlib-module http://localhost:3126/me/public/solidos/mashlib/boot.js \
      -- --idp --single-user --single-user-name me
 # then put (or symlink) a checkout of solidos-nobuild at <root>/me/public/solidos
+
+# LWS storage with its own data browser (a checkout of mashlib-lws at <root>/lws-data/apps-mashlib-lws):
+lwsd --port 3126 --no-auth --browser http://localhost:3126/lws/apps-mashlib-lws/boot.js
 ```
+
+A navigation (`Sec-Fetch-Dest: document`, or `text/html` preferred over RDF in `Accept`) to a
+container or a non-HTML resource gets a page that loads the browser module with
+`<meta name="lws-storage">` naming the storage; apps fetching `application/lws+json`, Turtle or
+the file itself are unaffected.
 
 With auth on (the default), reads are public and writes require an agent authenticated by
 the JSS auth chain (NIP-98 / Solid-OIDC / Bearer). See CONFORMANCE.md C6/C7 for the
