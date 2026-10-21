@@ -325,8 +325,8 @@ export async function activate (api) {
     const names = (await fs.readdir(abs, { withFileTypes: true })).filter((d) => !d.name.startsWith('.'))
     const items = []
     for (const d of names.sort((a, b) => a.name.localeCompare(b.name))) {
-      const st = await fs.stat(path.join(abs, d.name))
-      items.push(d.isDirectory()
+      const st = await fs.stat(path.join(abs, d.name)) // follows symlinks, so a linked directory lists as a container
+      items.push(st.isDirectory()
         ? { type: 'Container', id: prefix + urlPath + d.name + '/' }
         : {
             type: 'DataResource',
