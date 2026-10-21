@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'child_process'
+import { createRequire } from 'module'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, delimiter, resolve } from 'path'
@@ -99,7 +100,18 @@ if (!existsSync(todoFile)) {
   }, null, 2))
 }
 
-const jss = spawn('jss', jssArgs, {
+// Run the JSS this package depends on, wherever npm put it: nested under
+// lwsd in a global install, hoisted beside it in a local one. Resolving the
+// package (rather than relying on node_modules/.bin on PATH) keeps an older
+// global `jss` from being picked up by accident. Falls back to PATH.
+let jssCmd = 'jss'; let jssArgv = jssArgs
+try {
+  const pkgPath = createRequire(import.meta.url).resolve('javascript-solid-server/package.json')
+  const bin = JSON.parse(readFileSync(pkgPath, 'utf8')).bin
+  const rel = typeof bin === 'string' ? bin : bin?.jss
+  if (rel) { jssCmd = process.execPath; jssArgv = [join(dirname(pkgPath), rel), ...jssArgs] }
+} catch { /* not resolvable: use jss from PATH */ }
+const jss = spawn(jssCmd, jssArgv, {
   stdio: 'inherit',
   env: {
     ...process.env,
