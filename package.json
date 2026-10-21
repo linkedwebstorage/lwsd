@@ -7,6 +7,14 @@
   "bin": {
     "lwsd": "./index.js"
   },
+  "files": [
+    "index.js",
+    "lws/",
+    "scripts/",
+    "README.md",
+    "CONFORMANCE.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node index.js",
     "test": "node test/run.js",

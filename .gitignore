@@ -7,3 +7,7 @@ package-lock.json
 
 # Touchstone checkout and reports (scripts/touchstone.sh)
 .touchstone/
+
+# scratch data roots from local runs (lwsd --root …)
+idx*/
+*/.plugins/
