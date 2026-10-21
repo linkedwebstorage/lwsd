@@ -19,7 +19,8 @@ import chalk from 'chalk'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-const options = { port: 3126, host: 'localhost', root: './data', prefix: '/lws', auth: true }
+const options = { port: 3126, host: 'localhost', root: './data', prefix: '/lws', auth: true, mashlibModule: null }
+const passthrough = [] // everything after `--` goes to jss as is
 
 const args = process.argv.slice(2)
 for (let i = 0; i < args.length; i++) {
@@ -29,6 +30,8 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--root' || a === '-r') options.root = args[++i]
   else if (a === '--prefix') options.prefix = args[++i]
   else if (a === '--no-auth') options.auth = false
+  else if (a === '--mashlib-module') options.mashlibModule = args[++i]
+  else if (a === '--') { passthrough.push(...args.slice(i + 1)); break }
   else if (a === '--help') {
     console.log(chalk.cyan('\nLWSD — Linked Web Storage Daemon\n'))
     console.log('Usage: lwsd [options]\n')
@@ -37,6 +40,8 @@ for (let i = 0; i < args.length; i++) {
     console.log('  -r, --root <path>   Data directory (default: ./data)')
     console.log('  --prefix <path>     LWS storage prefix (default: /lws)')
     console.log('  --no-auth           Public server, anonymous writes (dev/testing)')
+    console.log('  --mashlib-module <url>  Serve an ES module data browser (e.g. solidos-nobuild) for browser navigations')
+    console.log('  -- <jss options>    Pass the rest to jss start (e.g. -- --idp --single-user)')
     console.log('\nResources:')
     console.log('  https://github.com/linkedwebstorage/lwsd')
     console.log('  https://github.com/w3c/lws-protocol')
@@ -56,6 +61,8 @@ const jssArgs = [
   '--plugin', join(__dirname, 'lws', 'plugin.js') + '@' + options.prefix,
 ]
 if (!options.auth) jssArgs.push('--public')
+if (options.mashlibModule) jssArgs.push('--mashlib-module', options.mashlibModule)
+jssArgs.push(...passthrough)
 
 console.log(chalk.cyan('LWSD') + chalk.dim(' — Linked Web Storage Daemon'))
 console.log(chalk.dim(`storage: http://${options.host}:${options.port}${options.prefix}/`))

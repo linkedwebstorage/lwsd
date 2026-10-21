@@ -48,6 +48,15 @@ curl -X PUT http://localhost:3126/lws/notes/list.txt --data 'bread' -i
 | `-r, --root <path>` | `./data` | JSS data directory (LWS storage lives in `lws-data/` inside it) |
 | `--prefix <path>` | `/lws` | LWS storage root prefix |
 | `--no-auth` | off | Public server with anonymous writes (dev/testing) |
+| `--mashlib-module <url>` | off | Serve an ES-module data browser for browser navigations, e.g. [solidos-nobuild](https://github.com/JavaScriptSolidServer/solidos-nobuild) from inside the pod |
+| `-- <jss options>` | — | Everything after `--` goes to `jss start` as is (e.g. `-- --idp --single-user`) |
+
+```bash
+# JSS pod at /me/ with SolidOS as its data browser, and LWS storage at /lws/, one server:
+lwsd --port 3126 --mashlib-module http://localhost:3126/me/public/solidos/mashlib/boot.js \
+     -- --idp --single-user --single-user-name me
+# then put (or symlink) a checkout of solidos-nobuild at <root>/me/public/solidos
+```
 
 With auth on (the default), reads are public and writes require an agent authenticated by
 the JSS auth chain (NIP-98 / Solid-OIDC / Bearer). See CONFORMANCE.md C6/C7 for the
