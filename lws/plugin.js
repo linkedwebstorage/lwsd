@@ -1184,6 +1184,22 @@ export async function activate (api) {
 
   await fastify.register(async (scope) => {
     scope.removeAllContentTypeParsers()
+
+    // CORS for the LWS surface, over whatever the host set: a browser app on another
+    // origin may send every method LWS uses (QUERY for the type search), the headers
+    // its requests carry, and — when the page is public and the storage is on the
+    // user's own network — the private/local-network preflight Chrome adds
+    // (Access-Control-Request-Private-Network / -Local-Network) is answered.
+    scope.addHook('onSend', async (req, reply, payload) => {
+      reply.header('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, QUERY, OPTIONS')
+      const allowed = String(reply.getHeader('access-control-allow-headers') || '')
+      const extra = ['Accept', 'Authorization', 'Content-Type', 'If-Match', 'If-None-Match', 'Link', 'Slug', 'Depth', 'Prefer', 'Range', 'Content-Digest', 'Signature', 'Signature-Input', 'X-LWS-Purpose']
+        .filter((h) => !new RegExp(`(^|,)\\s*${h}\\s*(,|$)`, 'i').test(allowed))
+      if (extra.length) reply.header('access-control-allow-headers', (allowed ? allowed + ', ' : '') + extra.join(', '))
+      if (req.headers['access-control-request-private-network'] === 'true') reply.header('access-control-allow-private-network', 'true')
+      if (req.headers['access-control-request-local-network'] === 'true') reply.header('access-control-allow-local-network', 'true')
+      return payload
+    })
     for (const t of PATCH_TYPES) {
       scope.addContentTypeParser(t, { parseAs: 'string' }, (r, body, done) => {
         try { done(null, JSON.parse(body)) } catch (e) { done(e) }

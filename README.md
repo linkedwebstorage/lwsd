@@ -49,6 +49,7 @@ curl -X PUT http://localhost:3126/lws/notes/list.txt --data 'bread' -i
 | `--prefix <path>` | `/lws` | LWS storage root prefix |
 | `--no-auth` | off | Public server with anonymous writes (dev/testing) |
 | `--mashlib-module <url>` | off | Serve an ES-module data browser for browser navigations, e.g. [solidos-nobuild](https://github.com/JavaScriptSolidServer/solidos-nobuild) from inside the pod |
+| CORS | — | The plugin answers for its own surface: every LWS method (QUERY included) and request header allowed, and Chrome's private/local-network preflight answered, so a browser app on another origin — a public page too — can use a storage on your own machine |
 | `--browser <url>` | off | Serve an ES-module data browser for browser navigations into the LWS storage, e.g. [mashlib-lws](https://github.com/linkedwebstorage/mashlib-lws)'s `boot.js` (env `LWS_BROWSER`). HTML resources are still served as themselves |
 | `-- <jss options>` | — | Everything after `--` goes to `jss start` as is (e.g. `-- --idp --single-user`) |
 
