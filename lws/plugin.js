@@ -165,6 +165,15 @@ export async function activate (api) {
   // server-intrinsic classes, or content"). Deliberately shallow — the
   // subject's own `a` / `@type` in Turtle and JSON(-LD), absolute IRIs only —
   // so indexing stays cheap and never parses untrusted bodies deeply.
+  // The bytes to store for a create/update. An application/lws+json body (a
+  // notification delivered to an inbox container, say) arrives parsed, so it
+  // is serialised back; everything else is the string or buffer it came as.
+  const bodyBytes = (req) => {
+    const body = req.body
+
+    return body == null ? '' : typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)
+  }
+
   function bodyTypes (mediaType, body) {
     const text = Buffer.isBuffer(body) ? body.toString() : typeof body === 'string' ? body : body ? JSON.stringify(body) : ''
     if (!text || text.length > 1_000_000) return []
@@ -1076,7 +1085,7 @@ export async function activate (api) {
           return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
         if (wantsContainer) await fs.mkdir(childAbs)
-        else await fs.writeFile(childAbs, req.body ?? '')
+        else await fs.writeFile(childAbs, bodyBytes(req))
         const cst = await fs.stat(childAbs)
         recordLinks(childPath, req.headers.link, wantsContainer, wantsContainer ? undefined : (mediaTypeOf(req) || 'application/octet-stream'),
           wantsContainer ? [] : bodyTypes(mediaTypeOf(req), req.body))
@@ -1102,7 +1111,7 @@ export async function activate (api) {
         if (await overQuota((req.body || '').length - st.size)) {
           return problem(reply, 507, 'Insufficient Storage', 'storage quota exceeded')
         }
-        await fs.writeFile(abs, req.body ?? '')
+        await fs.writeFile(abs, bodyBytes(req))
         const putTypes = bodyTypes(mediaTypeOf(req), req.body)
         if (req.headers.link || putTypes.length) recordLinks(urlPath, req.headers.link, false, mediaTypeOf(req), putTypes)
         else setFormat(urlPath, mediaTypeOf(req))
