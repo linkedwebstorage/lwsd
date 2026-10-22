@@ -159,7 +159,10 @@ Exit 1 means a verdict was reached and it's non-conformant; exit 2 means the har
 verdict (misconfigured or unreachable).
 
 **210 of 221 Touchstone tests pass — 0 failed, 0 cantTell, 11 inapplicable (3 SAML, 8 preconditions
-for the other legal choice). Conformant.** [Touchstone](https://github.com/ebremer/touchstone) `master`
+for the other legal choice). Conformant.** Re-run 22 Oct 2026 on 0.0.7 plus the fixes since
+(`--browser`, the plugin's CORS answers, inbox delivery, the container race, symlinked directories):
+the same 210 of 221, 0 failed (`scripts/touchstone.sh --auth`; the open target gives 73 passed, 148
+inapplicable, since nothing authenticated applies). [Touchstone](https://github.com/ebremer/touchstone) `master`
 (`cd01608`) is the W3C LWS conformance harness re-baselined on the 19 October 2026 drafts (core WD of
 19 Oct, authn suites of 15 Oct); 221 is its whole catalogue. 21 Oct 2026, per specification module:
 
