@@ -199,7 +199,9 @@ Run it yourself with `scripts/touchstone.sh --auth`; a fresh report lands in `.t
 repository's head on every harness update and publishes the results beside the other LWS servers:
 **<https://ebremer.com/lws/conformance>** (14 Oct 2026: 197 of 205, conformant; 19 Oct, on the
 re-baselined harness and before this repository followed the new drafts: 197 of 221 with two move
-refusals failing — fixed here, pending his re-run). That page, not this README, is the current number.
+refusals failing; 21 Oct, 0.0.6: 209 of 221, 0 failed, 12 inapplicable, conformant — one test more
+inapplicable than the run here, a difference of deployment, not of behaviour). That page, not this
+README, is the current number.
 
 Outside the harness's reach: the `200` + `Content-Location` + `301` behaviour of a storage that does
 not preserve identifiers on a move (the harness has no test for it yet; `test/move.js` covers it);
